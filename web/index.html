@@ -1,0 +1,152 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Oculiq — Attention Intelligence</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@200;300;400;500;600;700&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <div class="orb orb-a"></div>
+  <div class="orb orb-b"></div>
+
+  <button id="gearBtn" class="gear" title="Settings & info" aria-label="Settings">⚙</button>
+  <div id="settings" class="settings hidden">
+    <div class="set-head">Settings &amp; info<button id="setClose" class="rm">×</button></div>
+
+    <div class="set-sec">
+      <h4>Storage</h4>
+      <p id="storageLine" class="set-p">…</p>
+      <button id="wipeBtn" class="sm danger">Delete all processed data</button>
+      <p class="set-note">Removes every stored analysis (inputs, annotated outputs, reports). Single runs can be deleted from History.</p>
+    </div>
+
+    <div class="set-sec">
+      <h4>AI insights</h4>
+      <p id="llmLine" class="set-p">…</p>
+      <p class="set-note">Set OPENAI_API_KEY or GEMINI_API_KEY in the .env file to use an LLM. Only report numbers are sent — footage never leaves this machine.</p>
+    </div>
+
+    <div class="set-sec">
+      <h4>How measurement works</h4>
+      <p class="set-note">People are detected with YOLO11-pose and tracked with persistent IDs. Attention is <b>orientation-based</b>: head pose when the face is visible (confidence 0.85), body orientation from shoulder geometry when it isn't (confidence 0.5) — including people with their back to the camera. A person "looks" at a zone when their direction falls inside an attention cone for ≥0.4s. Perspective is auto-calibrated per camera from how people shrink with distance. Rates ship with 95% confidence intervals. This is honest proxy measurement, not eye-tracking.</p>
+    </div>
+  </div>
+
+  <aside class="sidebar">
+    <div class="logo"><span class="mark"></span><span class="word">Oculiq</span><span class="beta">beta</span></div>
+    <nav>
+      <button class="nav-item on" data-step="upload"><span class="n">1</span>Upload</button>
+      <button class="nav-item" data-step="zones" disabled><span class="n">2</span>Ad zones</button>
+      <button class="nav-item" data-step="analyze" disabled><span class="n">3</span>Analyze</button>
+      <button class="nav-item" data-step="report" disabled><span class="n">4</span>Report</button>
+      <button class="nav-item nav-sep" data-step="history"><span class="n">≡</span>History</button>
+    </nav>
+    <div class="side-foot">
+      <div class="local-badge"><span class="dot-live"></span>100% on-device</div>
+      <p>Footage never leaves this machine. YOLO11-pose · ByteTrack · orientation-based attention.</p>
+    </div>
+  </aside>
+
+  <main>
+    <!-- STEP 1: UPLOAD -->
+    <section class="step on" id="step-upload">
+      <header class="step-head">
+        <h1>Attention <em>Intelligence.</em></h1>
+        <p>Turn standard footage into measured human attention. No eye-tracking glasses. No sensors. No cloud.</p>
+      </header>
+      <div class="dropzone" id="dropzone">
+        <input type="file" id="fileInput" accept="video/*,image/*" hidden />
+        <div class="dz-ring"><div class="dz-eye"></div></div>
+        <p>Drop a video or photo — or <button class="link" id="pickBtn">browse files</button></p>
+        <small>MP4 · MOV · JPG · PNG — fixed camera (CCTV) recommended, up to 4K</small>
+      </div>
+      <div class="feature-row">
+        <div class="feat"><b>Ground truth</b><span>Measured attention, not panel estimates</span></div>
+        <div class="feat"><b>Zero hardware</b><span>Works with cameras you already own</span></div>
+        <div class="feat"><b>Privacy-safe</b><span>On-device processing, anonymous metrics</span></div>
+      </div>
+    </section>
+
+    <!-- STEP 2: ZONES -->
+    <section class="step" id="step-zones">
+      <header class="step-head compact">
+        <h2>Draw your ad zones</h2>
+        <p>Drag a diagonal over each ad surface. One-time setup per fixed camera. Multiple zones unlock A/B comparison.</p>
+      </header>
+      <div class="stage-grid">
+        <div>
+          <div class="canvas-wrap" id="canvasWrap">
+            <video id="video" playsinline muted></video>
+            <img id="photo" alt="" />
+            <canvas id="draw"></canvas>
+            <div class="zone-pop hidden" id="zonePop">
+              <input id="zpLabel" placeholder="e.g. Billboard A" maxlength="40" />
+              <div class="zp-row">
+                <select id="zpType"><option value="billboard">billboard</option><option value="screen">digital screen</option><option value="window">shop window</option></select>
+                <input id="zpCost" type="number" min="0" placeholder="cost/day" />
+              </div>
+              <div class="zp-row"><button id="zpSave" class="primary sm">Save zone</button><button id="zpCancel" class="sm">Cancel</button></div>
+            </div>
+          </div>
+          <div class="controls">
+            <button id="zoneBtn" class="primary">+ Draw zone</button>
+            <span class="hint">drag a diagonal on the frame</span>
+            <span class="spacer"></span>
+            <label class="chk"><input type="checkbox" id="crowdMode" /> Crowded scene <small>tiled multi-scan</small></label>
+            <button id="toAnalyze" disabled>Continue →</button>
+          </div>
+        </div>
+        <div class="zone-side">
+          <h3>Zones</h3>
+          <ul id="zoneList" class="zone-list"><li class="empty">No zones yet</li></ul>
+        </div>
+      </div>
+    </section>
+
+    <!-- STEP 3: ANALYZE -->
+    <section class="step" id="step-analyze">
+      <header class="step-head compact">
+        <h2>Analyzing on this device</h2>
+        <p id="anSub">YOLO11-pose x · ByteTrack IDs · orientation cone test — live preview below.</p>
+      </header>
+      <div class="an-grid">
+        <div class="an-preview">
+          <img id="livePreview" alt="live preview" />
+          <div class="scanline"></div>
+        </div>
+        <div class="an-side">
+          <div class="ring-wrap">
+            <svg viewBox="0 0 120 120" class="ring">
+              <circle cx="60" cy="60" r="52" class="ring-bg" />
+              <circle cx="60" cy="60" r="52" class="ring-fg" id="ringFg" />
+            </svg>
+            <div class="ring-num"><span id="pct">0</span><small>%</small></div>
+          </div>
+          <div class="live-cards" id="liveCards"></div>
+          <button id="cancelBtn" class="danger sm">Cancel</button>
+        </div>
+      </div>
+    </section>
+
+    <!-- STEP 4: REPORT -->
+    <section class="step" id="step-report">
+      <div id="reportRoot"></div>
+    </section>
+
+    <!-- HISTORY / WORKSPACE -->
+    <section class="step" id="step-history">
+      <header class="step-head compact">
+        <h2>Analysis history</h2>
+        <p>Every analysis is stored on this machine. Open past reports, compare zones across locations.</p>
+      </header>
+      <div id="historyList"></div>
+    </section>
+  </main>
+
+  <script type="module" src="app.js"></script>
+</body>
+</html>
