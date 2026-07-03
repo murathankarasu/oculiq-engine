@@ -263,6 +263,88 @@ class SceneModel:
             pts.append(q)
         return pts
 
+    # ---------- 3D bakış (Faz 2) ----------
+    def up(self):
+        """Zemin normali, kameradan yukarı bakacak şekilde."""
+        if self.ground is None:
+            return None
+        n, dpl = self.ground
+        n = np.asarray(n, dtype=float)
+        return n if dpl > 0 else -n
+
+    def lateral_axes(self):
+        """Dünya eksenleri: L (görüntü-sağı, zemine izdüşük), C (kameraya doğru, zeminde)."""
+        e1, e2, n = self._plane_axes()
+        if e1 is None:
+            return None, None
+        ex = np.array([1.0, 0.0, 0.0])
+        L = ex - float(ex @ n) * n
+        nrm = np.linalg.norm(L)
+        if nrm < 1e-6:
+            return None, None
+        return L / nrm, -e1   # e1 kameradan uzağa; C = kameraya doğru
+
+    def head_pos(self, foot_u, foot_v, eye_h=1.55):
+        pos = self.person_pos(foot_u, foot_v)
+        u = self.up()
+        if pos is None or u is None:
+            return None
+        return pos + u * eye_h
+
+    def gaze_dir3d(self, dx_img, dy_img, k, sig):
+        """Görüntü-uzayı yön vektörü -> dünya 3D bakış yönü.
+        body: zemin azimutu (yanal + derinlik), dikey bileşen yok (ölçülemiyor).
+        head: yanal + kameraya-doğru + dikey (burun ofsetinden pitch)."""
+        L, C = self.lateral_axes()
+        u = self.up()
+        if L is None or u is None:
+            return None
+        if sig == "body":
+            ay = dy_img / max(k, 1e-6)      # + = kameraya doğru
+            v = dx_img * L + ay * C
+        else:
+            lat = max(-1.0, min(1.0, dx_img))
+            fwd = math.sqrt(max(0.0, 1.0 - lat * lat))
+            v = lat * L + fwd * C + (-dy_img) * u
+        n = np.linalg.norm(v)
+        return v / n if n > 1e-6 else None
+
+    @staticmethod
+    def ang3d(a, b):
+        na = np.linalg.norm(a) or 1e-9
+        nb = np.linalg.norm(b) or 1e-9
+        c = float(a @ b) / (na * nb)
+        return math.degrees(math.acos(max(-1.0, min(1.0, c))))
+
+    def looks_at_3d(self, head3, dir3, quad, noise_deg, sig):
+        """3D koni testi: bakış ışını, bölgenin 3D yüzeyine dönük mü?
+        body: gerçek azimut (zemin düzleminde) — dikey ölçülemediği için serbest.
+        head: tam 3D açı (dikey dahil)."""
+        to = quad["center"] - head3
+        dist = float(np.linalg.norm(to))
+        if dist < 0.3:
+            return False
+        if sig == "body":
+            u = self.up()
+            a = dir3 - float(dir3 @ u) * u
+            b = to - float(to @ u) * u
+            half = math.degrees(math.atan((quad["w_m"] / 2) / dist))
+        else:
+            a, b = dir3, to
+            diag = math.hypot(quad["w_m"], quad["h_m"]) / 2
+            half = math.degrees(math.atan(diag / dist))
+        return self.ang3d(a, b) <= noise_deg + min(half, 25.0)
+
+    def depth_grid(self, gw=96):
+        """What-if için kaba derinlik ızgarası (tarayıcıya gider, ~birkaç KB)."""
+        if self.depth is None:
+            return None
+        import cv2
+        gh = max(8, int(round(gw * self.H / self.W)))
+        g = cv2.resize(self.depth, (gw, gh), interpolation=cv2.INTER_AREA)
+        return {"gw": gw, "gh": gh,
+                "z": [[round(float(v), 1) for v in row] for row in g]}
+
     # ---------- rapor ----------
     def state(self):
         if not self.enabled:

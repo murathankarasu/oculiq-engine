@@ -471,6 +471,8 @@ class AttentionEngine:
         peak = 0
         rays = []               # what-if simülasyonu için kayıtlı bakış ışınları
         sim_frame_saved = False
+        gaze3d_n = 0            # kaç bakış örneği gerçek 3D testten geçti
+        gaze_total = 0
 
         out_path = Path(path).with_suffix(".annotated.mp4")
         writer = self._writer(out_path, W, H, 1.0 / dt)
@@ -504,6 +506,41 @@ class AttentionEngine:
             density[b][0] += len(dets)
             density[b][1] += 1
 
+            # what-if arka planı: video ~%25'indeyken temiz (overlay'siz) bir kare sakla
+            if not sim_frame_saved and t >= duration * 0.25:
+                sf = Path(path).with_suffix(".sim.jpg")
+                cv2.imwrite(str(sf), frame)
+                job["sim_frame"] = str(sf)
+                sim_frame_img = frame.copy()
+                sim_frame_saved = True
+
+            # 3D sahneyi canlı kur: yeterli insan örneği birikince (bir kez).
+            # NOT: bölge testlerinden ÖNCE — bu karenin kararları 3D geometriyle verilsin.
+            if scene is None and sim_frame_saved and len(foot_samples) >= 12:
+                try:
+                    from server.scene3d import SceneModel
+                    job["status"] = "scene-3d"
+                    scene = SceneModel().build(sim_frame_img, foot_samples)
+                    if scene.enabled:
+                        scene._grid = scene.grid_segments()
+                        zquads = {z["id"]: scene.zone_quad(z["rect"]) for z in zs}
+                    job["status"] = "processing"
+                except Exception:
+                    scene = None
+
+            # 3D bakış: kafa konumu + dünya-uzayı yön (sahne kilitliyse)
+            if scene is not None and scene.enabled:
+                for d in dets:
+                    if d["dx"] is None or (d["dx"] == 0 and d["dy"] == 0):
+                        continue
+                    bx, by, bw, bh = d["box"]
+                    h3 = scene.head_pos(bx + bw / 2.0, by + float(bh))
+                    if h3 is None:
+                        continue
+                    g3 = scene.gaze_dir3d(d["dx"], d["dy"], d.get("k", self.persp_k), d["sig"])
+                    if g3 is not None:
+                        d["head3"], d["dir3"] = h3, g3
+
             for d in dets:
                 p = persons.setdefault(d["id"], {
                     "first_t": t, "frames": 0, "dwell": defaultdict(float),
@@ -529,15 +566,27 @@ class AttentionEngine:
 
                 # bakış ışını kaydı: yön taşıyan her ölçüm (frontal (0,0) hariç)
                 if (d["dx"] is not None and (d["dx"] or d["dy"]) and len(rays) < 80000):
-                    rays.append([round(t, 2), d["id"], int(d["c"][0]), int(d["c"][1]),
-                                 round(d["dx"], 3), round(d["dy"], 3),
-                                 round(d.get("v", 0), 2),
-                                 1 if d["sig"] == "body" else 0,
-                                 d["k"], d["cone"]])
+                    ray = [round(t, 2), d["id"], int(d["c"][0]), int(d["c"][1]),
+                           round(d["dx"], 3), round(d["dy"], 3),
+                           round(d.get("v", 0), 2),
+                           1 if d["sig"] == "body" else 0,
+                           d["k"], d["cone"]]
+                    if "head3" in d:  # 3D alanlar: kafa konumu + dünya yönü
+                        ray += [round(float(v), 2) for v in d["head3"]]
+                        ray += [round(float(v), 3) for v in d["dir3"]]
+                    rays.append(ray)
 
                 for z in zs:
-                    raw_look = (d["sig"] in ("head", "body")
-                                and self.looks_at(d, z))
+                    q = zquads.get(z["id"])
+                    if "head3" in d and q:   # Faz 2: gerçek 3D ışın-yüzey testi
+                        raw_look = (d["sig"] in ("head", "body")
+                                    and scene.looks_at_3d(d["head3"], d["dir3"], q,
+                                                          d.get("cone", 14.0), d["sig"]))
+                        gaze3d_n += 1
+                    else:                    # sahne yokken 2.5D azimut testi
+                        raw_look = (d["sig"] in ("head", "body")
+                                    and self.looks_at(d, z))
+                    gaze_total += 1
                     p["hist"][z["id"]].append(raw_look)
                     hist = p["hist"][z["id"]]
                     # temporal majority vote — "oyun mantığı": tek karelik titremeyi ele
@@ -559,27 +608,6 @@ class AttentionEngine:
                         if d["dx"] is not None and (d["dx"] or d["dy"]):
                             self._heat_add(heat, d, z, W, H)
                     p["looking"][z["id"]] = look
-
-            # what-if arka planı: video ~%25'indeyken temiz (overlay'siz) bir kare sakla
-            if not sim_frame_saved and t >= duration * 0.25:
-                sf = Path(path).with_suffix(".sim.jpg")
-                cv2.imwrite(str(sf), frame)
-                job["sim_frame"] = str(sf)
-                sim_frame_img = frame.copy()
-                sim_frame_saved = True
-
-            # 3D sahneyi canlı kur: yeterli insan örneği birikince (bir kez)
-            if scene is None and sim_frame_saved and len(foot_samples) >= 12:
-                try:
-                    from server.scene3d import SceneModel
-                    job["status"] = "scene-3d"
-                    scene = SceneModel().build(sim_frame_img, foot_samples)
-                    if scene.enabled:
-                        scene._grid = scene.grid_segments()
-                        zquads = {z["id"]: scene.zone_quad(z["rect"]) for z in zs}
-                    job["status"] = "processing"
-                except Exception:
-                    scene = None
 
             if demographics:
                 demographics = self._gender_pass(frame, dets, persons)  # hata -> kapanır
@@ -610,12 +638,20 @@ class AttentionEngine:
                "min_dwell": self.min_dwell, "k": self.persp_k, "auto_cone": self.auto_cone,
                "persons": {str(k): round(v["first_t"], 2) for k, v in persons.items()},
                "rays": rays}
+        if scene is not None and scene.enabled and scene.up() is not None:
+            grid = scene.depth_grid()
+            if grid:
+                sim["s3"] = {"f": round(scene.f, 1), "cx": scene.cx, "cy": scene.cy,
+                             "up": [round(float(v), 4) for v in scene.up()],
+                             "grid": grid}
         report = self._report(persons, zs, timeline, duration, peak, cost_map or {},
                               still=False, elapsed=time.time() - t0, sim=sim)
         report["scan_mode"] = "tiled multi-scan (crowd)" if tiled else "single-pass"
         report["calibration"] = self._cal.state()
         self._attach_scene3d(report, sim_frame_img if sim_frame_img is not None else frame,
                              foot_samples, persons, zs, job, prebuilt=scene)
+        if gaze_total and isinstance(report.get("scene3d"), dict):
+            report["scene3d"]["gaze3d_pct"] = round(gaze3d_n / gaze_total * 100, 1)
         if demographics and persons:
             from server import demographics as demo
             report["audience"] = demo.aggregate(persons, zs, self.min_dwell)
@@ -959,7 +995,18 @@ class AttentionEngine:
                                        (x, y + h, 1, -1), (x + w, y + h, -1, -1)):
                 cv2.line(out, (cx_, cy_), (cx_ + sx * L, cy_), col, th)
                 cv2.line(out, (cx_, cy_), (cx_, cy_ + sy * L), col, th)
-            if d["dx"] is not None and (d["dx"] or d["dy"]):
+            drew3d = False
+            if "head3" in d and scene is not None:
+                # 3D bakış ışını: kafa konumundan dünya-uzayında 2.5m ileri
+                p1 = scene.project(d["head3"])
+                p2 = scene.project(d["head3"] + d["dir3"] * 2.5)
+                if p1 and p2:
+                    a1 = (int(p1[0]), int(p1[1]))
+                    a2 = (int(p2[0]), int(p2[1]))
+                    cv2.arrowedLine(out, a1, a2, (12, 12, 12), th + 4, cv2.LINE_AA, tipLength=0.28)
+                    cv2.arrowedLine(out, a1, a2, col, th + 1, cv2.LINE_AA, tipLength=0.28)
+                    drew3d = True
+            if not drew3d and d["dx"] is not None and (d["dx"] or d["dy"]):
                 ln = max(w * 1.3, 56 * sc)
                 sx0, sy0 = int(d["c"][0]), int(d["c"][1])
                 ex, ey = int(d["c"][0] + d["dx"] * ln), int(d["c"][1] + d["dy"] * ln)

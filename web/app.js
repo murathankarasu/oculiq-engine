@@ -309,7 +309,7 @@ function renderReport(rep, jobId) {
     <div>
       <span class="badge"><span class="dot-live"></span>measured · on-device</span>
       <h2>Attention report</h2>
-      <div class="sub">${esc(rep.method)} · ${esc(rep.model)} · ${esc(rep.scan_mode || "single-pass")}${rep.calibration && rep.calibration.auto ? " · auto-calibrated" : ""}${rep.scene3d && rep.scene3d.enabled ? " · 3D scene (" + fmt(rep.scene3d.calib_confidence, 0) + "% conf)" : ""} · ${rep.still ? "snapshot" : fmt(rep.duration, 1) + "s footage"} · processed in ${fmt(rep.processing_seconds, 1)}s</div>
+      <div class="sub">${esc(rep.method)} · ${esc(rep.model)} · ${esc(rep.scan_mode || "single-pass")}${rep.calibration && rep.calibration.auto ? " · auto-calibrated" : ""}${rep.scene3d && rep.scene3d.enabled ? " · 3D scene (" + fmt(rep.scene3d.calib_confidence, 0) + "% conf)" : ""}${rep.scene3d && rep.scene3d.gaze3d_pct != null ? " · 3D gaze " + fmt(rep.scene3d.gaze3d_pct, 0) + "%" : ""} · ${rep.still ? "snapshot" : fmt(rep.duration, 1) + "s footage"} · processed in ${fmt(rep.processing_seconds, 1)}s</div>
     </div>
     <div class="rep-actions">
       <button id="dlPdf" class="primary">Export PDF</button>
@@ -351,7 +351,7 @@ function renderReport(rep, jobId) {
     html += `
     <div class="sim-section">
       <h3>What-if simulator <span class="new-tag">UNIQUE</span></h3>
-      <div class="sub">Drag the white box — or draw a new one anywhere. Impressions recompute live from ${fmt(rep.sim.rays.length)} recorded gaze rays; watch gaze flow into the placement. Cone is automatic (per-person + zone size). No re-processing.</div>
+      <div class="sub">Drag the white box — or draw a new one anywhere. Impressions recompute live from ${fmt(rep.sim.rays.length)} recorded gaze rays${rep.sim.s3 ? " in true 3D (ray ↔ surface geometry)" : ""}; watch gaze flow into the placement. Cone is automatic (per-person + zone size). No re-processing.</div>
       <div class="sim-grid">
         <div class="sim-wrap">
           <canvas id="simCanvas"></canvas>
@@ -455,8 +455,61 @@ const angBetween = (ax, ay, bx, by) => {
   return Math.acos(Math.max(-1, Math.min(1, (ax * bx + ay * by) / (na * nb))));
 };
 
-// Bir ışın verilen dikdörtgene bakıyor mu? Python looks_at ile birebir (oto-koni).
-function rayHit(r, rect, sim, bias) {
+// Dikdörtgenin 3D karşılığı: kaba derinlik ızgarasından medyan Z -> merkez + metre boyut
+function rectQuad3d(rect, sim) {
+  const s3 = sim.s3;
+  if (!s3) return null;
+  const { gw, gh, z } = s3.grid;
+  const xs = Math.max(0, Math.floor((rect.x / sim.w) * gw));
+  const xe = Math.min(gw - 1, Math.ceil(((rect.x + rect.w) / sim.w) * gw));
+  const ys = Math.max(0, Math.floor((rect.y / sim.h) * gh));
+  const ye = Math.min(gh - 1, Math.ceil(((rect.y + rect.h) / sim.h) * gh));
+  const vals = [];
+  for (let gy = ys; gy <= ye; gy++)
+    for (let gx = xs; gx <= xe; gx++) {
+      const v = z[gy] && z[gy][gx];
+      if (v > 0.5 && v < 300) vals.push(v);
+    }
+  if (!vals.length) return null;
+  vals.sort((a, b) => a - b);
+  const Z = vals[Math.floor(vals.length / 2)];
+  const cxp = rect.x + rect.w / 2, cyp = rect.y + rect.h / 2;
+  return {
+    c3: [((cxp - s3.cx) * Z) / s3.f, ((cyp - s3.cy) * Z) / s3.f, Z],
+    wm: (rect.w / s3.f) * Z,
+    hm: (rect.h / s3.f) * Z,
+  };
+}
+
+// Bir ışın verilen dikdörtgene bakıyor mu? Python ile birebir: 3D varsa gerçek
+// ışın-yüzey açısı (motor looks_at_3d), yoksa 2.5D azimut koni testi.
+function rayHit(r, rect, sim, bias, quad3) {
+  if (quad3 && r.length >= 16) {
+    const sig = r[7], rcone = r[9] || 14;
+    let ax = r[13], ay = r[14], az = r[15];
+    let bx = quad3.c3[0] - r[10], by = quad3.c3[1] - r[11], bz = quad3.c3[2] - r[12];
+    const dist = Math.hypot(bx, by, bz) || 1e-6;
+    let half;
+    if (sig === 1) {           // body: gerçek azimut — dikey bileşen düşülür
+      const u = sim.s3.up;
+      const da = ax * u[0] + ay * u[1] + az * u[2];
+      ax -= da * u[0]; ay -= da * u[1]; az -= da * u[2];
+      const db = bx * u[0] + by * u[1] + bz * u[2];
+      bx -= db * u[0]; by -= db * u[1]; bz -= db * u[2];
+      half = (Math.atan(quad3.wm / 2 / dist) * 180) / Math.PI;
+    } else {                    // head: tam 3D açı (dikey dahil)
+      half = (Math.atan(Math.hypot(quad3.wm, quad3.hm) / 2 / dist) * 180) / Math.PI;
+    }
+    const na = Math.hypot(ax, ay, az) || 1e-9;
+    const nb = Math.hypot(bx, by, bz) || 1e-9;
+    const ang = (Math.acos(Math.max(-1, Math.min(1,
+      (ax * bx + ay * by + az * bz) / (na * nb)))) * 180) / Math.PI;
+    return ang <= rcone + Math.min(half, 25) + bias;
+  }
+  return rayHit2d(r, rect, sim, bias);
+}
+
+function rayHit2d(r, rect, sim, bias) {
   const [t, pid, x, y, dx0, dy0, v, sig, rk, rcone] = r;
   const k = sig === 1 ? (rk || sim.k || 1) : 1;
   const zc = { x: rect.x + rect.w / 2, y: rect.y + rect.h / 2 };
@@ -475,10 +528,11 @@ function rayHit(r, rect, sim, bias) {
 
 function simCompute(rect, sim, bias) {
   const dwell = {}, first = {}, look = {};
+  const quad3 = rectQuad3d(rect, sim);   // 3D bölge — kare başına BİR kez
   let att = 0;
   for (const r of sim.rays) {
     const pid = r[1], t = r[0];
-    const hit = rayHit(r, rect, sim, bias);
+    const hit = rayHit(r, rect, sim, bias, quad3);
     if (hit) {
       dwell[pid] = (dwell[pid] || 0) + sim.dt;
       att += sim.dt;
@@ -552,9 +606,10 @@ function initSim(rep, jobId) {
 
   function recompute() {
     const zc = { x: vz.x + vz.w / 2, y: vz.y + vz.h / 2 };
+    const q3 = rectQuad3d(vz, sim);
     particles = [];
     for (let i = 0; i < drawRays.length; i++) {
-      const h = rayHit(drawRays[i], vz, sim, bias);
+      const h = rayHit(drawRays[i], vz, sim, bias, q3);
       hits[i] = h;
       if (h && particles.length < 180) {
         const r = drawRays[i];
