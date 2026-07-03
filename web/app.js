@@ -348,16 +348,20 @@ function renderReport(rep, jobId) {
     html += `
     <div class="sim-section">
       <h3>What-if simulator <span class="new-tag">UNIQUE</span></h3>
-      <div class="sub">Drag the virtual placement — or draw a new one anywhere. Metrics recompute instantly from ${fmt(rep.sim.rays.length)} recorded gaze rays. No re-processing.</div>
+      <div class="sub">Drag the white box — or draw a new one anywhere. Impressions recompute live from ${fmt(rep.sim.rays.length)} recorded gaze rays; watch gaze flow into the placement. Cone is automatic (per-person + zone size). No re-processing.</div>
       <div class="sim-grid">
-        <div class="sim-wrap"><canvas id="simCanvas"></canvas></div>
+        <div class="sim-wrap">
+          <canvas id="simCanvas"></canvas>
+          <div class="sim-flow" id="simFlow">— rays flowing in</div>
+        </div>
         <div>
           <div class="sim-metrics" id="simMetrics"></div>
           <div class="cone-cal">
-            <label>Cone calibration <b id="coneVal">${rep.sim.cone_deg}°</b></label>
-            <input type="range" id="coneSlider" min="15" max="60" step="1" value="${rep.sim.cone_deg}" />
-            <small>Attention-cone half angle — tune per camera, watch metrics react. Analysis used ${rep.sim.cone_deg}°.</small>
+            <label>Cone sensitivity <b id="coneVal">auto</b></label>
+            <input type="range" id="coneSlider" min="-10" max="10" step="1" value="0" />
+            <small>Cone is computed automatically. Nudge ± only to override the auto-calibration for this camera.</small>
           </div>
+          <button id="simReset" class="sm" style="margin-top:10px">Reset to ${rep.zones[0] ? esc(rep.zones[0].label) : "original"}</button>
         </div>
       </div>
     </div>`;
@@ -442,128 +446,36 @@ function mdLite(t) {
   return html;
 }
 
-/* ---------- what-if simulator ---------- */
-function initSim(rep, jobId) {
-  const sim = rep.sim;
-  const canvas = $("simCanvas"), ctx = canvas.getContext("2d");
-  canvas.width = sim.w; canvas.height = sim.h;
-  const bg = new Image();
-  bg.src = `/api/jobs/${jobId}/frame`;
+/* ---------- what-if simulator (animated, auto-cone) ---------- */
+const angBetween = (ax, ay, bx, by) => {
+  const na = Math.hypot(ax, ay) || 1e-9, nb = Math.hypot(bx, by) || 1e-9;
+  return Math.acos(Math.max(-1, Math.min(1, (ax * bx + ay * by) / (na * nb))));
+};
 
-  const z0 = rep.zones[0];
-  let coneDeg = sim.cone_deg;
-  const compute = (rect) => simCompute(rect, sim, coneDeg);
-  const base = z0 ? simCompute(normToPx(z0.norm, sim), sim, sim.cone_deg) : null;
-  let vz = z0
-    ? normToPx(z0.norm, sim)
-    : { x: sim.w * 0.35, y: sim.h * 0.3, w: sim.w * 0.3, h: sim.h * 0.25 };
-  let mode = null, grab = null, anchor = null;
-
-  const pt = (e) => {
-    const r = canvas.getBoundingClientRect();
-    return { x: (e.clientX - r.left) / r.width * sim.w, y: (e.clientY - r.top) / r.height * sim.h };
-  };
-  const inside = (p) => p.x >= vz.x && p.x <= vz.x + vz.w && p.y >= vz.y && p.y <= vz.y + vz.h;
-
-  canvas.style.touchAction = "none";
-  canvas.onpointerdown = (e) => {
-    canvas.setPointerCapture(e.pointerId);
-    const p = pt(e);
-    if (inside(p)) { mode = "move"; grab = { dx: p.x - vz.x, dy: p.y - vz.y }; }
-    else { mode = "draw"; anchor = p; vz = { x: p.x, y: p.y, w: 1, h: 1 }; }
-  };
-  canvas.onpointermove = (e) => {
-    if (!mode) return;
-    const p = pt(e);
-    if (mode === "move") {
-      vz.x = Math.min(Math.max(p.x - grab.dx, 0), sim.w - vz.w);
-      vz.y = Math.min(Math.max(p.y - grab.dy, 0), sim.h - vz.h);
-    } else {
-      vz = { x: Math.min(anchor.x, p.x), y: Math.min(anchor.y, p.y),
-             w: Math.abs(p.x - anchor.x), h: Math.abs(p.y - anchor.y) };
-    }
-    schedule();
-  };
-  canvas.onpointerup = () => { mode = null; schedule(); };
-
-  let raf = null;
-  function schedule() {
-    if (raf) return;
-    raf = requestAnimationFrame(() => { raf = null; render(); showMetrics(); });
+// Bir ışın verilen dikdörtgene bakıyor mu? Python looks_at ile birebir (oto-koni).
+function rayHit(r, rect, sim, bias) {
+  const [t, pid, x, y, dx0, dy0, v, sig, rk, rcone] = r;
+  const k = sig === 1 ? (rk || sim.k || 1) : 1;
+  const zc = { x: rect.x + rect.w / 2, y: rect.y + rect.h / 2 };
+  const ddx = dx0, ddy = dy0 / k;
+  const vx = zc.x - x, vy = (zc.y - y) / k;
+  let cone;
+  if (sim.auto_cone) {
+    const half = angBetween(rect.x - x, vy, rect.x + rect.w - x, vy) * 180 / Math.PI / 2;
+    cone = (rcone || 14) + Math.min(half, 20) + bias;
+  } else {
+    cone = sim.cone_deg * (sig === 1 ? 0.7 : 1) + bias;
   }
-
-  function render() {
-    ctx.clearRect(0, 0, sim.w, sim.h);
-    if (bg.complete) ctx.drawImage(bg, 0, 0, sim.w, sim.h);
-    const lw = Math.max(2, sim.w / 480);
-    for (const z of rep.zones) {
-      const r = normToPx(z.norm, sim);
-      ctx.setLineDash([8, 6]); ctx.strokeStyle = "rgba(255,255,255,.45)"; ctx.lineWidth = lw;
-      ctx.strokeRect(r.x, r.y, r.w, r.h);
-      ctx.setLineDash([]);
-      ctx.fillStyle = "rgba(255,255,255,.6)";
-      ctx.font = `${Math.max(13, sim.w / 80)}px sans-serif`;
-      ctx.fillText(z.label, r.x + 6, r.y - 8);
-    }
-    ctx.fillStyle = "rgba(255,255,255,.14)";
-    ctx.fillRect(vz.x, vz.y, vz.w, vz.h);
-    ctx.strokeStyle = "#fff"; ctx.lineWidth = lw * 1.4;
-    ctx.strokeRect(vz.x, vz.y, vz.w, vz.h);
-    ctx.fillStyle = "#fff";
-    ctx.font = `600 ${Math.max(13, sim.w / 80)}px sans-serif`;
-    ctx.fillText("VIRTUAL", vz.x + 6, vz.y - 8);
-  }
-  bg.onload = () => schedule();
-
-  const slider = $("coneSlider");
-  if (slider) {
-    slider.oninput = () => {
-      coneDeg = parseFloat(slider.value);
-      $("coneVal").textContent = coneDeg + "°";
-      schedule();
-    };
-  }
-
-  function showMetrics() {
-    const m = compute(vz);
-    const d = (cur, b, suffix = "") => {
-      if (!base || b == null || cur == null) return "";
-      const diff = cur - b;
-      if (Math.abs(diff) < 0.005) return `<small>±0</small>`;
-      return `<small>${diff > 0 ? "+" : ""}${fmt(diff, 1)}${suffix} vs ${esc(z0.label)}</small>`;
-    };
-    $("simMetrics").innerHTML =
-      row("Impressions", fmt(m.imp), d(m.imp, base?.imp)) +
-      row("Attention rate", fmt(m.rate, 1) + "%", d(m.rate, base?.rate, "pp")) +
-      (rep.still ? "" : row("Attentive seconds", fmt(m.att, 1) + "s", d(m.att, base?.att, "s"))) +
-      (rep.still ? "" : row("Avg dwell", fmt(m.avg, 2) + "s", d(m.avg, base?.avg, "s"))) +
-      (rep.still || m.ttfl == null ? "" : row("Time to first look", fmt(m.ttfl, 1) + "s", ""));
-  }
-  const row = (k, v, delta) =>
-    `<div class="sim-row"><span class="k">${k}</span><span class="v">${v} ${delta}</span></div>`;
-
-  schedule();
+  const ang = angBetween(ddx, ddy, vx, vy) * 180 / Math.PI;
+  return ang <= Math.max(2, cone);
 }
 
-const normToPx = (n, sim) => ({ x: n[0] * sim.w, y: n[1] * sim.h, w: n[2] * sim.w, h: n[3] * sim.h });
-
-function simCompute(rect, sim, coneDeg) {
-  const cos = Math.cos(((coneDeg ?? sim.cone_deg) * Math.PI) / 180);
-  const k = sim.k || 1;
-  const zc = { x: rect.x + rect.w / 2, y: rect.y + rect.h / 2 };
+function simCompute(rect, sim, bias) {
   const dwell = {}, first = {}, look = {};
   let att = 0;
-  for (const [t, pid, x, y, dx0, dy0, , sig, rk] of sim.rays) {
-    let dx = dx0, dy = dy0, c2 = cos;
-    let vx = zc.x - x, vy = zc.y - y;
-    if (sig === 1) {  // body: zemin-azimut uzayı (ışının kendi k'sı) + dar koni
-      const kk = rk || k;
-      dy = dy0 / kk; vy = vy / kk;
-      c2 = Math.cos(((coneDeg ?? sim.cone_deg) * 0.7 * Math.PI) / 180);
-    }
-    const na = Math.hypot(dx, dy) || 1;
-    const n = Math.hypot(vx, vy) || 1;
-    const hit = (dx * vx + dy * vy) / (na * n) > c2;
+  for (const r of sim.rays) {
+    const pid = r[1], t = r[0];
+    const hit = rayHit(r, rect, sim, bias);
     if (hit) {
       dwell[pid] = (dwell[pid] || 0) + sim.dt;
       att += sim.dt;
@@ -576,12 +488,179 @@ function simCompute(rect, sim, coneDeg) {
   const traffic = Object.keys(sim.persons).length || 1;
   const ttfls = lookers.map((p) => (first[p] ?? 0) - (sim.persons[p] ?? 0)).filter((v) => v >= 0);
   return {
-    imp,
-    rate: (imp / traffic) * 100,
-    att,
+    imp, rate: (imp / traffic) * 100, att,
     avg: imp ? lookers.reduce((s, p) => s + dwell[p], 0) / imp : 0,
     ttfl: ttfls.length ? ttfls.reduce((a, b) => a + b, 0) / ttfls.length : null,
   };
+}
+
+const normToPx = (n, sim) => ({ x: n[0] * sim.w, y: n[1] * sim.h, w: n[2] * sim.w, h: n[3] * sim.h });
+
+function initSim(rep, jobId) {
+  const sim = rep.sim;
+  const canvas = $("simCanvas"), ctx = canvas.getContext("2d");
+  canvas.width = sim.w; canvas.height = sim.h;
+  const bg = new Image(); bg.src = `/api/jobs/${jobId}/frame`;
+  const lw = Math.max(2, sim.w / 480);
+  const fs = Math.max(13, sim.w / 78);
+
+  const z0 = rep.zones[0];
+  let bias = 0;
+  const base = z0 ? simCompute(normToPx(z0.norm, sim), sim, 0) : null;
+  const origVz = z0 ? normToPx(z0.norm, sim)
+    : { x: sim.w * 0.35, y: sim.h * 0.3, w: sim.w * 0.3, h: sim.h * 0.25 };
+  let vz = { ...origVz };
+  let mode = null, grab = null, anchor = null;
+
+  // çizim için ışın örneklemi (perf); her ışının anlık isabeti + akış parçacığı
+  const step = sim.rays.length > 480 ? Math.ceil(sim.rays.length / 480) : 1;
+  const drawRays = sim.rays.filter((_, i) => i % step === 0);
+  let hits = new Array(drawRays.length).fill(false);
+  let particles = [];
+  const shown = { imp: 0, rate: 0, att: 0, avg: 0, ttfl: 0 };  // sayaç animasyonu için
+
+  const pt = (e) => {
+    const r = canvas.getBoundingClientRect();
+    return { x: (e.clientX - r.left) / r.width * sim.w, y: (e.clientY - r.top) / r.height * sim.h };
+  };
+  const inside = (p) => p.x >= vz.x && p.x <= vz.x + vz.w && p.y >= vz.y && p.y <= vz.y + vz.h;
+
+  canvas.style.touchAction = "none";
+  canvas.style.cursor = "grab";
+  canvas.onpointerdown = (e) => {
+    canvas.setPointerCapture(e.pointerId);
+    const p = pt(e);
+    if (inside(p)) { mode = "move"; grab = { dx: p.x - vz.x, dy: p.y - vz.y }; canvas.style.cursor = "grabbing"; }
+    else { mode = "draw"; anchor = p; vz = { x: p.x, y: p.y, w: 1, h: 1 }; }
+  };
+  canvas.onpointermove = (e) => {
+    if (!mode) return;
+    const p = pt(e);
+    if (mode === "move") {
+      vz.x = Math.min(Math.max(p.x - grab.dx, 0), sim.w - vz.w);
+      vz.y = Math.min(Math.max(p.y - grab.dy, 0), sim.h - vz.h);
+    } else {
+      vz = { x: Math.min(anchor.x, p.x), y: Math.min(anchor.y, p.y),
+             w: Math.abs(p.x - anchor.x), h: Math.abs(p.y - anchor.y) };
+    }
+    recompute();
+  };
+  canvas.onpointerup = () => { mode = null; canvas.style.cursor = "grab"; recompute(); };
+
+  function recompute() {
+    const zc = { x: vz.x + vz.w / 2, y: vz.y + vz.h / 2 };
+    particles = [];
+    for (let i = 0; i < drawRays.length; i++) {
+      const h = rayHit(drawRays[i], vz, sim, bias);
+      hits[i] = h;
+      if (h && particles.length < 180) {
+        const r = drawRays[i];
+        particles.push({ x0: r[2], y0: r[3], x1: zc.x, y1: zc.y, t: Math.random() });
+      }
+    }
+    const m = simCompute(vz, sim, bias);
+    $("simFlow").textContent = `${particles.length ? [...hits].filter(Boolean).length : 0} / ${drawRays.length} rays flowing in`;
+    showMetrics(m);
+  }
+
+  function showMetrics(m) {
+    const d = (cur, b, suffix = "") => {
+      if (!base || b == null) return "";
+      const diff = cur - b;
+      const cls = diff > 0.05 ? "up" : diff < -0.05 ? "down" : "flat";
+      const s = Math.abs(diff) < 0.05 ? "±0" : `${diff > 0 ? "+" : ""}${fmt(diff, 1)}${suffix}`;
+      return `<small class="delta ${cls}">${s} vs ${esc(z0.label)}</small>`;
+    };
+    $("simMetrics").innerHTML =
+      row("Impressions", "imp", fmt(shown.imp), d(m.imp, base?.imp)) +
+      row("Attention rate", "rate", fmt(shown.rate, 1) + "%", d(m.rate, base?.rate, "pp")) +
+      (rep.still ? "" : row("Attentive seconds", "att", fmt(shown.att, 1) + "s", d(m.att, base?.att, "s"))) +
+      (rep.still ? "" : row("Avg dwell", "avg", fmt(shown.avg, 2) + "s", d(m.avg, base?.avg, "s"))) +
+      (rep.still || m.ttfl == null ? "" : row("Time to first look", "ttfl", fmt(shown.ttfl, 1) + "s", ""));
+    target.imp = m.imp; target.rate = m.rate; target.att = m.att;
+    target.avg = m.avg; target.ttfl = m.ttfl ?? 0;
+  }
+  const target = { ...shown };
+  const row = (k, id, v, delta) =>
+    `<div class="sim-row"><span class="k">${k}</span><span class="v"><span data-sv="${id}">${v}</span> ${delta}</span></div>`;
+
+  const slider = $("coneSlider");
+  if (slider) slider.oninput = () => {
+    bias = parseFloat(slider.value);
+    $("coneVal").textContent = bias === 0 ? "auto" : (bias > 0 ? "+" : "") + bias + "°";
+    recompute();
+  };
+  const rst = $("simReset");
+  if (rst) rst.onclick = () => { vz = { ...origVz }; if (slider) { slider.value = 0; bias = 0; $("coneVal").textContent = "auto"; } recompute(); };
+
+  // sürekli animasyon döngüsü: akan bakış parçacıkları + nabız + sayaç yumuşatma
+  let running = true;
+  function frame(now) {
+    if (!running || !document.getElementById("simCanvas")) return;
+    ctx.clearRect(0, 0, sim.w, sim.h);
+    if (bg.complete && bg.naturalWidth) ctx.drawImage(bg, 0, 0, sim.w, sim.h);
+    else { ctx.fillStyle = "#111"; ctx.fillRect(0, 0, sim.w, sim.h); }
+    ctx.save(); ctx.globalAlpha = 0.5; ctx.fillStyle = "#000"; ctx.fillRect(0, 0, sim.w, sim.h); ctx.restore();
+
+    // ışınlar: kısa yön çizgileri (isabet = beyaz parlak, ıskalama = soluk)
+    ctx.lineWidth = Math.max(1, lw * 0.5);
+    for (let i = 0; i < drawRays.length; i++) {
+      const r = drawRays[i], L = Math.max(sim.w * 0.02, 22);
+      ctx.strokeStyle = hits[i] ? "rgba(255,255,255,.5)" : "rgba(255,255,255,.08)";
+      ctx.beginPath(); ctx.moveTo(r[2], r[3]);
+      ctx.lineTo(r[2] + r[4] * L, r[3] + r[5] * L); ctx.stroke();
+    }
+
+    // diğer bölgeler (referans, kesikli)
+    for (const z of rep.zones) {
+      const r = normToPx(z.norm, sim);
+      ctx.setLineDash([8, 6]); ctx.strokeStyle = "rgba(255,255,255,.4)"; ctx.lineWidth = lw;
+      ctx.strokeRect(r.x, r.y, r.w, r.h); ctx.setLineDash([]);
+      ctx.fillStyle = "rgba(255,255,255,.55)"; ctx.font = `${fs}px sans-serif`;
+      ctx.fillText(z.label, r.x + 6, r.y - 8);
+    }
+
+    // akan bakış parçacıkları (reklamın içine akan dikkat)
+    const zc = { x: vz.x + vz.w / 2, y: vz.y + vz.h / 2 };
+    ctx.fillStyle = "#2fd39a";
+    for (const p of particles) {
+      p.t += 0.012 + p.t * 0.02;
+      if (p.t >= 1) p.t = 0;
+      const e = 1 - Math.pow(1 - p.t, 2);
+      const px = p.x0 + (zc.x - p.x0) * e, py = p.y0 + (zc.y - p.y0) * e;
+      ctx.globalAlpha = 0.25 + 0.7 * (1 - p.t);
+      ctx.beginPath(); ctx.arc(px, py, Math.max(2, sim.w / 520), 0, 6.283); ctx.fill();
+    }
+    ctx.globalAlpha = 1;
+
+    // sanal bölge — nabız atan parlak çerçeve
+    const pulse = 0.5 + 0.5 * Math.sin(now / 380);
+    ctx.fillStyle = `rgba(47,211,154,${0.08 + 0.06 * pulse})`;
+    ctx.fillRect(vz.x, vz.y, vz.w, vz.h);
+    ctx.strokeStyle = `rgba(47,211,154,${0.6 + 0.4 * pulse})`;
+    ctx.lineWidth = lw * 1.6; ctx.strokeRect(vz.x, vz.y, vz.w, vz.h);
+    ctx.fillStyle = "#2fd39a"; ctx.font = `600 ${fs}px sans-serif`;
+    ctx.fillText("VIRTUAL", vz.x + 6, vz.y - 8);
+
+    // sayaç yumuşatma (ekrandaki değer hedefe doğru akar)
+    let changed = false;
+    for (const key of ["imp", "rate", "att", "avg", "ttfl"]) {
+      const diff = target[key] - shown[key];
+      if (Math.abs(diff) > 0.001) { shown[key] += diff * 0.2; changed = true; }
+      else shown[key] = target[key];
+    }
+    if (changed) {
+      const set = (id, v) => { const el = document.querySelector(`[data-sv="${id}"]`); if (el) el.textContent = v; };
+      set("imp", fmt(shown.imp)); set("rate", fmt(shown.rate, 1) + "%");
+      set("att", fmt(shown.att, 1) + "s"); set("avg", fmt(shown.avg, 2) + "s");
+      set("ttfl", fmt(shown.ttfl, 1) + "s");
+    }
+    requestAnimationFrame(frame);
+  }
+
+  bg.onload = () => recompute();
+  recompute();
+  requestAnimationFrame(frame);
 }
 
 const best = (rep) => rep.zones.reduce((a, b) => (a.aqs >= b.aqs ? a : b));

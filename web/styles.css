@@ -350,8 +350,18 @@ button.sm { padding: 7px 13px; font-size: 12.5px; }
 .sim-section .sub { color: var(--muted); font-size: 12.5px; font-weight: 300; margin-bottom: 14px; }
 .sim-grid { display: grid; grid-template-columns: minmax(0, 1fr) 250px; gap: 16px; align-items: start; }
 @media (max-width: 900px) { .sim-grid { grid-template-columns: 1fr; } }
-.sim-wrap { border: 1px solid var(--border); border-radius: 2px; overflow: hidden; line-height: 0; background: #000; }
-.sim-wrap canvas { width: 100%; height: auto; display: block; cursor: crosshair; }
+.sim-wrap { position: relative; border: 1px solid var(--border); border-radius: 2px; overflow: hidden; line-height: 0; background: #000; }
+.sim-wrap canvas { width: 100%; height: auto; display: block; }
+.sim-flow {
+  position: absolute; top: 10px; left: 10px; z-index: 2;
+  font-size: 11px; line-height: 1; letter-spacing: .5px; color: #2fd39a;
+  background: rgba(0,0,0,.6); border: 1px solid rgba(47,211,154,.4);
+  border-radius: 2px; padding: 5px 9px; backdrop-filter: blur(4px);
+}
+.sim-row .v .delta { display: block; font-size: 10.5px; font-weight: 300; margin-top: 2px; }
+.delta.up { color: #2fd39a; }
+.delta.down { color: #e88; }
+.delta.flat { color: var(--faint); }
 .sim-metrics { display: flex; flex-direction: column; gap: 8px; }
 .sim-row {
   display: flex; justify-content: space-between; align-items: baseline; gap: 10px;

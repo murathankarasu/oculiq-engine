@@ -511,11 +511,11 @@ class AttentionEngine:
                                  round(d["dx"], 3), round(d["dy"], 3),
                                  round(d.get("v", 0), 2),
                                  1 if d["sig"] == "body" else 0,
-                                 d["k"]])
+                                 d["k"], d["cone"]])
 
                 for z in zs:
                     raw_look = (d["sig"] in ("head", "body")
-                                and self.looks_at(d, z["center"]))
+                                and self.looks_at(d, z))
                     p["hist"][z["id"]].append(raw_look)
                     hist = p["hist"][z["id"]]
                     # temporal majority vote — "oyun mantığı": tek karelik titremeyi ele
@@ -567,7 +567,7 @@ class AttentionEngine:
         persons = {k: v for k, v in persons.items() if v["frames"] >= self.min_sightings}
         rays = [r for r in rays if r[1] in persons]  # hayaletlerin ışınları da elenir
         sim = {"w": W, "h": H, "dt": round(dt, 4), "cone_deg": self.cone_deg,
-               "min_dwell": self.min_dwell, "k": self.persp_k,
+               "min_dwell": self.min_dwell, "k": self.persp_k, "auto_cone": self.auto_cone,
                "persons": {str(k): round(v["first_t"], 2) for k, v in persons.items()},
                "rays": rays}
         report = self._report(persons, zs, timeline, duration, peak, cost_map or {},
@@ -603,7 +603,7 @@ class AttentionEngine:
 
         rays = [[0.0, d["id"], int(d["c"][0]), int(d["c"][1]),
                  round(d["dx"], 3), round(d["dy"], 3), 0.0,
-                 1 if d["sig"] == "body" else 0, d["k"]]
+                 1 if d["sig"] == "body" else 0, d["k"], d["cone"]]
                 for d in dets if d["dx"] is not None and (d["dx"] or d["dy"])]
         persons = {}
         for i, d in enumerate(dets):
@@ -612,7 +612,7 @@ class AttentionEngine:
                  "sig_sec": defaultdict(float)}
             for z in zs:
                 if (d["sig"] in ("head", "body")
-                        and self.looks_at(d, z["center"])):
+                        and self.looks_at(d, z)):
                     p["dwell"][z["id"]] = 1.0
                     p["episodes"][z["id"]] = 1
                     p["sig_sec"][d["sig"]] += 1
@@ -628,7 +628,7 @@ class AttentionEngine:
         job["preview"] = self._jpeg_b64(annotated, 1280)
         job["progress"] = 100
         sim = {"w": W, "h": H, "dt": 1.0, "cone_deg": self.cone_deg, "min_dwell": 0.5,
-               "k": self.persp_k,
+               "k": self.persp_k, "auto_cone": self.auto_cone,
                "persons": {str(k): 0.0 for k in persons}, "rays": rays}
         report = self._report(persons, zs, {}, 0, len(dets), cost_map or {},
                               still=True, elapsed=0, sim=sim)
