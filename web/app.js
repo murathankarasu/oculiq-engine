@@ -308,7 +308,7 @@ function renderReport(rep, jobId) {
     <div>
       <span class="badge"><span class="dot-live"></span>measured · on-device</span>
       <h2>Attention report</h2>
-      <div class="sub">${esc(rep.method)} · ${esc(rep.model)} · ${esc(rep.scan_mode || "single-pass")}${rep.calibration && rep.calibration.auto ? " · auto-calibrated" : ""} · ${rep.still ? "snapshot" : fmt(rep.duration, 1) + "s footage"} · processed in ${fmt(rep.processing_seconds, 1)}s</div>
+      <div class="sub">${esc(rep.method)} · ${esc(rep.model)} · ${esc(rep.scan_mode || "single-pass")}${rep.calibration && rep.calibration.auto ? " · auto-calibrated" : ""}${rep.scene3d && rep.scene3d.enabled ? " · 3D scene (" + fmt(rep.scene3d.calib_confidence, 0) + "% conf)" : ""} · ${rep.still ? "snapshot" : fmt(rep.duration, 1) + "s footage"} · processed in ${fmt(rep.processing_seconds, 1)}s</div>
     </div>
     <div class="rep-actions">
       <button id="dlPdf" class="primary">Export PDF</button>
@@ -321,6 +321,7 @@ function renderReport(rep, jobId) {
     <div class="kpi"><div class="k">Passersby (traffic)</div><div class="v" data-count="${rep.traffic}">0</div></div>
     <div class="kpi"><div class="k">Peak concurrency</div><div class="v" data-count="${rep.peak_concurrency}">0</div></div>
     ${rep.avg_concurrency != null ? `<div class="kpi"><div class="k">Avg crowd density</div><div class="v">${fmt(rep.avg_concurrency, 1)}<small> ppl</small></div></div>` : ""}
+    ${rep.scene3d && rep.scene3d.enabled ? `<div class="kpi" title="${GLOSS["3D calibration"]}"><div class="k">3D calibration <span class="new-tag">SCENE</span></div><div class="v">${fmt(rep.scene3d.calib_confidence, 0)}<small>% conf${rep.scene3d.camera_height_m ? " · cam " + fmt(rep.scene3d.camera_height_m, 1) + "m" : ""}</small></div></div>` : ""}
     ${rep.zones.length ? `<div class="kpi"><div class="k">Best zone (AQS)</div><div class="v">${esc(best(rep).label)} <small>${best(rep).aqs}</small></div></div>` : ""}
     <div class="kpi"><div class="k">Zones analyzed</div><div class="v" data-count="${rep.zones.length}">0</div></div>
   </div>`;
@@ -680,6 +681,9 @@ const GLOSS = {
   "Attention CPM": "Cost per 1,000 attentive seconds — pricing by actual attention, Oculiq's core currency.",
   "Signal mix": "Where the measurement came from: head pose (confidence 0.85) vs body orientation (confidence 0.5).",
   "95% CI": "Wilson confidence interval — the honest statistical range of the rate given the sample size.",
+  "3D calibration": "The scene is reconstructed in 3D (metric depth + ground plane). Confidence is self-verified: reconstructed people should cluster around 1.70m — the tighter the cluster, the more trustworthy the geometry.",
+  "Zone size": "Physical size of the ad surface in meters, reconstructed from the 3D scene.",
+  "View distance": "Average real-world distance (meters) between lookers and the ad surface.",
 };
 
 function glossaryHtml() {
@@ -768,6 +772,8 @@ function zoneReport(z, still) {
       ${still || z.time_to_first_look == null ? "" : `<div class="mcard" title="${GLOSS["Time to first look"]}"><div class="k">Time to first look <span class="new-tag">NEW</span></div><div class="v">${fmt(z.time_to_first_look, 1)}<small>s</small></div></div>`}
       ${still ? "" : `<div class="mcard" title="${GLOSS["Glances / looker"]}"><div class="k">Glances / looker <span class="new-tag">NEW</span></div><div class="v">${fmt(z.glances_per_looker, 1)}</div></div>`}
       ${still ? "" : `<div class="mcard" title="${GLOSS["Stopping power"]}"><div class="k">Stopping power <span class="new-tag">NEW</span></div><div class="v">${fmt(z.stopping_power, 0)}<small>% slowdown</small></div></div>`}
+      ${z.size_m ? `<div class="mcard" title="${GLOSS["Zone size"]}"><div class="k">Zone size <span class="new-tag">3D</span></div><div class="v">${fmt(z.size_m[0], 1)}×${fmt(z.size_m[1], 1)}<small>m</small></div></div>` : ""}
+      ${z.avg_view_distance_m != null ? `<div class="mcard" title="${GLOSS["View distance"]}"><div class="k">Avg view distance <span class="new-tag">3D</span></div><div class="v">${fmt(z.avg_view_distance_m, 1)}<small>m</small></div></div>` : ""}
     </div>
     ${sigMixHtml(z)}
 

@@ -5,3 +5,5 @@ python-multipart>=0.0.9
 lap>=0.5.12
 opencv-python>=4.10
 reportlab>=4.0
+transformers>=4.45
+

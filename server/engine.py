@@ -448,6 +448,8 @@ class AttentionEngine:
         tiled = self._use_tiles(W, H, crowd_mode)
         tracker = SimpleTracker(max_gone=int(2.0 / dt))  # ~2s memory
         self._cal = KCalibrator(H, fallback=self.persp_k)  # oto perspektif kalibrasyonu
+        foot_samples = []  # scene3d icin: (foot_u, foot_v, h_px)
+        sim_frame_img = None
         zs = self._prep_zones(zones, W, H)
         persons = {}
         heat = np.zeros((H // 4, W // 4), np.float32)
@@ -504,6 +506,13 @@ class AttentionEngine:
                     p["v"].append(v)
                     d["v"] = v
                 p["pos"] = d["c"]
+                # scene3d örnekleri + kişinin ortalama ayak noktası
+                bx, by, bw, bh = d["box"]
+                foot = (bx + bw / 2.0, by + float(bh))
+                if len(foot_samples) < 400:
+                    foot_samples.append((foot[0], foot[1], float(bh)))
+                fs = p.setdefault("foot_sum", [0.0, 0.0, 0])
+                fs[0] += foot[0]; fs[1] += foot[1]; fs[2] += 1
 
                 # bakış ışını kaydı: yön taşıyan her ölçüm (frontal (0,0) hariç)
                 if (d["dx"] is not None and (d["dx"] or d["dy"]) and len(rays) < 80000):
@@ -543,6 +552,7 @@ class AttentionEngine:
                 sf = Path(path).with_suffix(".sim.jpg")
                 cv2.imwrite(str(sf), frame)
                 job["sim_frame"] = str(sf)
+                sim_frame_img = frame.copy()
                 sim_frame_saved = True
 
             annotated = self._draw(frame, dets, zs, heat, t, len(persons), tiled)
@@ -574,6 +584,8 @@ class AttentionEngine:
                               still=False, elapsed=time.time() - t0, sim=sim)
         report["scan_mode"] = "tiled multi-scan (crowd)" if tiled else "single-pass"
         report["calibration"] = self._cal.state()
+        self._attach_scene3d(report, sim_frame_img if sim_frame_img is not None else frame,
+                             foot_samples, persons, zs, job)
         if density:
             report["density_timeline"] = [
                 {"t": b, "avg": round(s / max(f, 1), 1)} for b, (s, f) in sorted(density.items())]
@@ -634,7 +646,50 @@ class AttentionEngine:
                               still=True, elapsed=0, sim=sim)
         report["scan_mode"] = "tiled multi-scan (crowd)" if tiled else "single-pass"
         report["calibration"] = self._cal.state()
+        foot_samples = [(d["box"][0] + d["box"][2] / 2.0,
+                         d["box"][1] + float(d["box"][3]), float(d["box"][3]))
+                        for d in dets]
+        for i, d in enumerate(dets):  # fotoda kişi ayağı = tek örnek
+            persons[i]["foot_sum"] = [foot_samples[i][0], foot_samples[i][1], 1]
+        self._attach_scene3d(report, frame, foot_samples, persons, zs, job)
         return report
+
+    # ---------- scene3d ----------
+    def _attach_scene3d(self, report, frame, foot_samples, persons, zs, job):
+        """3D sahne kalibrasyonu: derinlik + odak + zemin düzlemi + bölge boyutu +
+        izleme mesafeleri. Başarısızlıkta rapor sadece enabled:false taşır."""
+        if frame is None or not foot_samples:
+            report["scene3d"] = {"enabled": False, "note": "no frame/person samples"}
+            return
+        try:
+            from server.scene3d import SceneModel
+            job["status"] = "scene-3d"
+            sm = SceneModel().build(frame, foot_samples)
+            report["scene3d"] = sm.state()
+            if not sm.enabled:
+                return
+            # bölge 3D'si + izleme mesafesi (bakanların ortalama ayak konumundan)
+            for z, zr in zip(zs, report["zones"]):
+                q = sm.zone_quad(z["rect"])
+                if not q:
+                    continue
+                zr["size_m"] = [q["w_m"], q["h_m"]]
+                zr["zone_depth_m"] = q["depth_m"]
+                dists = []
+                for p in persons.values():
+                    if p["dwell"][z["id"]] < self.min_dwell:
+                        continue
+                    fs = p.get("foot_sum")
+                    if not fs or not fs[2]:
+                        continue
+                    pos = sm.person_pos(fs[0] / fs[2], fs[1] / fs[2])
+                    if pos is not None:
+                        import numpy as _np
+                        dists.append(float(_np.linalg.norm(q["center"] - pos)))
+                if dists:
+                    zr["avg_view_distance_m"] = round(sum(dists) / len(dists), 1)
+        except Exception as e:
+            report["scene3d"] = {"enabled": False, "note": f"{type(e).__name__}: {e}"}
 
     # ---------- internals ----------
     def _prep_zones(self, zones, W, H):
