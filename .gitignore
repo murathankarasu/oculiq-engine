@@ -4,6 +4,7 @@
 jobs/
 models/*.pt
 models/*.task
+models/hf/
 __pycache__/
 *.pyc
 .DS_Store
