@@ -173,6 +173,96 @@ class SceneModel:
         return {"corners": c, "center": center, "w_m": round(wm, 2), "h_m": round(hm, 2),
                 "depth_m": round(Z, 1)}
 
+    def refit(self, person_samples):
+        """Derinliği yeniden hesaplamadan odak+zemini TÜM örneklerle tazele (ucuz)."""
+        if self.depth is None:
+            return self
+        d = self.depth
+        obs = []
+        for (fu, fv, h_px) in person_samples:
+            if h_px < 24:
+                continue
+            u = int(np.clip(fu, 2, self.W - 3))
+            v = int(np.clip(fv - h_px * 0.5, 2, self.H - 3))
+            Z = float(np.median(d[max(0, v - 4):v + 5, max(0, u - 4):u + 5]))
+            if 0.5 < Z < 200:
+                obs.append((float(h_px), Z))
+        if len(obs) >= 3:
+            self.samples = len(obs)
+            self.f = float(np.median([h * Z / MEAN_PERSON_M for h, Z in obs]))
+            heights = [h * Z / self.f for h, Z in obs]
+            self.height_mean = float(np.mean(heights))
+            self.height_std = float(np.std(heights))
+            self.confidence = round(max(0.0, min(1.0, 1.0 - self.height_std / 0.35)) * 100, 1)
+        return self
+
+    # ---------- görselleştirme (AR-tarzı) ----------
+    def project(self, P):
+        if P[2] <= 0.05:
+            return None
+        return (self.cx + self.f * P[0] / P[2], self.cy + self.f * P[1] / P[2])
+
+    def _plane_axes(self):
+        n, _ = self.ground
+        n = np.asarray(n, dtype=float)
+        fwd = np.array([0.0, 0.0, 1.0])
+        e1 = fwd - float(fwd @ n) * n
+        nrm = np.linalg.norm(e1)
+        if nrm < 1e-6:
+            return None, None, n
+        e1 /= nrm
+        e2 = np.cross(n, e1)
+        return e1, e2, n
+
+    def grid_segments(self, spacing=1.0, extent=14):
+        """Zemin düzlemine metrik ızgara — sabit kamerada BİR KEZ hesaplanır.
+        Gerçek yüzeye oturuyorsa kalibrasyon gözle doğrulanmış demektir."""
+        if self.ground is None or not self.f:
+            return []
+        n, dpl = self.ground
+        n = np.asarray(n, dtype=float)
+        ray = np.array([0.0, (self.H * 0.85 - self.cy) / self.f, 1.0])
+        denom = float(n @ ray)
+        if abs(denom) < 1e-6:
+            return []
+        t = -dpl / denom
+        if t <= 0 or t > 300:
+            return []
+        p0 = ray * t
+        e1, e2, _ = self._plane_axes()
+        if e1 is None:
+            return []
+        segs = []
+        R = extent
+        inb = lambda q: (q is not None and -self.W * 0.5 < q[0] < self.W * 1.5
+                         and -self.H * 0.5 < q[1] < self.H * 1.5)
+        for (a_ax, b_ax) in ((e1, e2), (e2, e1)):
+            for i in range(-R, R + 1):
+                prev = None
+                for j in range(-R, R + 1):
+                    q = self.project(p0 + b_ax * (i * spacing) + a_ax * (j * spacing))
+                    ok = inb(q)
+                    if prev is not None and ok:
+                        segs.append((prev, q, i % 5 == 0))
+                    prev = q if ok else None
+        return segs
+
+    def ground_ring(self, foot_u, foot_v, radius=0.35, npts=16):
+        """Kişinin ayağında zemine yapışık AR çapa halkası (piksel poligonu)."""
+        pos = self.person_pos(foot_u, foot_v)
+        if pos is None or self.ground is None:
+            return None
+        e1, e2, _ = self._plane_axes()
+        if e1 is None:
+            return None
+        pts = []
+        for a in np.linspace(0, 2 * math.pi, npts, endpoint=False):
+            q = self.project(pos + e1 * (math.cos(a) * radius) + e2 * (math.sin(a) * radius))
+            if q is None:
+                return None
+            pts.append(q)
+        return pts
+
     # ---------- rapor ----------
     def state(self):
         if not self.enabled:

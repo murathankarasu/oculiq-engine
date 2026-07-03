@@ -450,6 +450,8 @@ class AttentionEngine:
         self._cal = KCalibrator(H, fallback=self.persp_k)  # oto perspektif kalibrasyonu
         foot_samples = []  # scene3d icin: (foot_u, foot_v, h_px)
         sim_frame_img = None
+        scene = None       # sahne 3D modeli (video ortasinda kurulur, overlay'e girer)
+        zquads = {}
         zs = self._prep_zones(zones, W, H)
         persons = {}
         heat = np.zeros((H // 4, W // 4), np.float32)
@@ -555,7 +557,21 @@ class AttentionEngine:
                 sim_frame_img = frame.copy()
                 sim_frame_saved = True
 
-            annotated = self._draw(frame, dets, zs, heat, t, len(persons), tiled)
+            # 3D sahneyi canlı kur: yeterli insan örneği birikince (bir kez)
+            if scene is None and sim_frame_saved and len(foot_samples) >= 12:
+                try:
+                    from server.scene3d import SceneModel
+                    job["status"] = "scene-3d"
+                    scene = SceneModel().build(sim_frame_img, foot_samples)
+                    if scene.enabled:
+                        scene._grid = scene.grid_segments()
+                        zquads = {z["id"]: scene.zone_quad(z["rect"]) for z in zs}
+                    job["status"] = "processing"
+                except Exception:
+                    scene = None
+
+            annotated = self._draw(frame, dets, zs, heat, t, len(persons), tiled,
+                                   scene=scene, zquads=zquads)
             writer.write(annotated)
 
             if fi % (stride * 3) < stride:
@@ -585,7 +601,7 @@ class AttentionEngine:
         report["scan_mode"] = "tiled multi-scan (crowd)" if tiled else "single-pass"
         report["calibration"] = self._cal.state()
         self._attach_scene3d(report, sim_frame_img if sim_frame_img is not None else frame,
-                             foot_samples, persons, zs, job)
+                             foot_samples, persons, zs, job, prebuilt=scene)
         if density:
             report["density_timeline"] = [
                 {"t": b, "avg": round(s / max(f, 1), 1)} for b, (s, f) in sorted(density.items())]
@@ -652,10 +668,24 @@ class AttentionEngine:
         for i, d in enumerate(dets):  # fotoda kişi ayağı = tek örnek
             persons[i]["foot_sum"] = [foot_samples[i][0], foot_samples[i][1], 1]
         self._attach_scene3d(report, frame, foot_samples, persons, zs, job)
+        # foto çıktısını 3D overlay ile yeniden bas (ızgara + halkalar + metre etiketi)
+        try:
+            from server.scene3d import SceneModel
+            if report["scene3d"].get("enabled") and foot_samples:
+                sc = SceneModel().build(frame, foot_samples)
+                if sc.enabled:
+                    sc._grid = sc.grid_segments()
+                    zq = {z["id"]: sc.zone_quad(z["rect"]) for z in zs}
+                    annotated = self._draw(frame, dets, zs, heat, None, len(dets), tiled,
+                                           scene=sc, zquads=zq)
+                    cv2.imwrite(str(out_path), annotated)
+                    job["preview"] = self._jpeg_b64(annotated, 1280)
+        except Exception:
+            pass
         return report
 
     # ---------- scene3d ----------
-    def _attach_scene3d(self, report, frame, foot_samples, persons, zs, job):
+    def _attach_scene3d(self, report, frame, foot_samples, persons, zs, job, prebuilt=None):
         """3D sahne kalibrasyonu: derinlik + odak + zemin düzlemi + bölge boyutu +
         izleme mesafeleri. Başarısızlıkta rapor sadece enabled:false taşır."""
         if frame is None or not foot_samples:
@@ -664,7 +694,10 @@ class AttentionEngine:
         try:
             from server.scene3d import SceneModel
             job["status"] = "scene-3d"
-            sm = SceneModel().build(frame, foot_samples)
+            if prebuilt is not None and prebuilt.enabled:
+                sm = prebuilt.refit(foot_samples)  # tüm örneklerle güveni tazele (ucuz)
+            else:
+                sm = SceneModel().build(frame, foot_samples)
             report["scene3d"] = sm.state()
             if not sm.enabled:
                 return
@@ -818,10 +851,27 @@ class AttentionEngine:
         return {k: round(v / s * 100, 1) for k, v in tot.items()}
 
     # ---------- rendering ----------
-    def _draw(self, frame, dets, zs, heat, t, traffic, tiled=False):
+    def _draw(self, frame, dets, zs, heat, t, traffic, tiled=False, scene=None, zquads=None):
         out = frame.copy()
         H, W = out.shape[:2]
         sc = max(W / 1280, 0.8)
+
+        # --- AR katmanı: 3D zemin ızgarası gerçek yüzeye oturur (güven-renkli) ---
+        if scene is not None and scene.enabled and getattr(scene, "_grid", None):
+            gcol = ((154, 211, 47) if scene.confidence >= 70      # yeşil: güvenilir
+                    else (39, 159, 239) if scene.confidence >= 40  # amber: orta
+                    else (74, 75, 226))                            # kırmızı: düşük
+            ov = out.copy()
+            for (a, b, major) in scene._grid:
+                cv2.line(ov, (int(a[0]), int(a[1])), (int(b[0]), int(b[1])),
+                         gcol, 2 if major else 1, cv2.LINE_AA)
+            out = cv2.addWeighted(ov, 0.25, out, 0.75, 0)
+            # kişilerin ayağında zemine yapışık AR çapa halkaları
+            for d in dets:
+                bx, by, bw, bh = d["box"]
+                ring = scene.ground_ring(bx + bw / 2.0, by + float(bh))
+                if ring:
+                    cv2.polylines(out, [np.array(ring, np.int32)], True, gcol, 2, cv2.LINE_AA)
 
         if heat.max() > 0:
             hm = cv2.GaussianBlur(heat, (0, 0), 6)
@@ -839,6 +889,9 @@ class AttentionEngine:
             cv2.rectangle(out, (x, y), (x + w, y + h), z["color"], max(2, int(2 * sc)))
             n_look = sum(1 for d in dets if d["zone"] == z["id"])
             label = f'{z["label"]}  |  {n_look} looking'
+            q = (zquads or {}).get(z["id"])
+            if q:
+                label += f'  |  {q["w_m"]}x{q["h_m"]}m @ {q["depth_m"]}m'
             (tw, th), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.55 * sc, 2)
             cv2.rectangle(out, (x, y - th - 14), (x + tw + 14, y), z["color"], -1)
             cv2.putText(out, label, (x + 7, y - 7), cv2.FONT_HERSHEY_SIMPLEX,
@@ -869,6 +922,8 @@ class AttentionEngine:
         hud = f'OCULIQ  ·  on-device  ·  persons {traffic}'
         if tiled:
             hud += '  ·  tiled scan'
+        if scene is not None and scene.enabled:
+            hud += f'  ·  3D locked {scene.confidence:.0f}%'
         if t is not None:
             hud += f'  ·  t={t:.1f}s'
         (tw, th), _ = cv2.getTextSize(hud, cv2.FONT_HERSHEY_SIMPLEX, 0.55 * sc, 2)
