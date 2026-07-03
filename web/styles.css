@@ -438,6 +438,11 @@ button.sm { padding: 7px 13px; font-size: 12.5px; }
 .sigmix { margin-top: 10px; }
 .sigmix .bar-line { display: flex; height: 8px; border-radius: 2px; overflow: hidden; background: rgba(255,255,255,.05); }
 .sigmix .lbl { font-size: 10px; color: var(--faint); letter-spacing: 1px; text-transform: uppercase; margin-bottom: 5px; display: flex; justify-content: space-between; }
+.aud-row { display: grid; grid-template-columns: 150px 1fr 200px; gap: 12px; align-items: center; margin-top: 10px; font-size: 12px; }
+.aud-row .k { color: var(--muted); font-weight: 300; letter-spacing: .5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.aud-row .bar-line { display: flex; border-radius: 2px; overflow: hidden; background: rgba(255,255,255,.05); }
+.aud-row small { color: var(--faint); font-weight: 300; }
+.aud-note { margin: 12px 0 0; font-size: 11px; color: var(--faint); font-weight: 300; line-height: 1.5; }
 
 /* ---------- AI insights ---------- */
 .ins-section { border: 1px solid var(--border); border-radius: 2px; padding: 22px 24px; margin-bottom: 14px; }

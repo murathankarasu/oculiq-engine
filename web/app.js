@@ -231,6 +231,7 @@ async function startAnalysis() {
   fd.append("zones", JSON.stringify(state.zones.map(({ id, label, type, x, y, w, h }) => ({ id, label, type, x, y, w, h }))));
   fd.append("costs", JSON.stringify(Object.fromEntries(state.zones.map((z) => [z.id, z.cost]))));
   fd.append("crowd_mode", $("crowdMode").checked ? "on" : "auto");
+  fd.append("demographics", $("demoMode").checked ? "on" : "off");
 
   let res;
   try {
@@ -327,6 +328,7 @@ function renderReport(rep, jobId) {
   </div>`;
 
   html += densitySvg(rep);
+  html += audienceHtml(rep);
   html += glossaryHtml();
 
   for (const z of rep.zones) html += zoneReport(z, rep.still);
@@ -684,6 +686,7 @@ const GLOSS = {
   "3D calibration": "The scene is reconstructed in 3D (metric depth + ground plane). Confidence is self-verified: reconstructed people should cluster around 1.70m — the tighter the cluster, the more trustworthy the geometry.",
   "Zone size": "Physical size of the ad surface in meters, reconstructed from the 3D scene.",
   "View distance": "Average real-world distance (meters) between lookers and the ad surface.",
+  "Audience insights": "Opt-in, on-device gender estimate from visible faces only. Aggregate percentages — never per-person, no images stored. Compare traffic vs lookers to see who the creative attracts.",
 };
 
 function glossaryHtml() {
@@ -727,6 +730,29 @@ function donutSvg(rep) {
     `<span><span class="zdot" style="background:${z.color}"></span>${esc(z.label)} — ${Math.round(z.attentive_seconds / total * 100)}%</span>`).join("");
   return `<div class="donut-wrap"><svg width="90" height="90" viewBox="0 0 90 90">${segs}</svg>
     <div class="donut-legend"><span style="color:var(--text)">Attention share</span>${legend}</div></div>`;
+}
+
+function audienceHtml(rep) {
+  const a = rep.audience;
+  if (!a || !a.enabled) return "";
+  const bar = (s) => {
+    const n = (s.female || 0) + (s.male || 0) + (s.unknown || 0) || 1;
+    const f = (s.female / n) * 100, m = (s.male / n) * 100, u = (s.unknown / n) * 100;
+    return `<div class="bar-line" style="height:14px">
+      <div style="width:${f}%;background:#fff" title="female"></div>
+      <div style="width:${m}%;background:rgba(255,255,255,.45)" title="male"></div>
+      <div style="width:${u}%;background:rgba(255,255,255,.12)" title="unknown"></div></div>`;
+  };
+  const legend = (s) => `<small>${s.female} female · ${s.male} male · ${s.unknown} unknown</small>`;
+  let rows = `<div class="aud-row"><span class="k" title="${GLOSS["Audience insights"]}">Traffic</span>${bar(a.traffic_split)}${legend(a.traffic_split)}</div>`;
+  for (const z of rep.zones) {
+    const zi = a.zones[String(z.id)];
+    if (zi) rows += `<div class="aud-row"><span class="k">${esc(z.label)} lookers</span>${bar(zi.lookers_split)}${legend(zi.lookers_split)}</div>`;
+  }
+  return `<div class="wide-chart aud">
+    <h4>Audience insights <span class="new-tag">BETA</span> — coverage ${fmt(a.coverage_pct, 0)}% of people had a classifiable face</h4>
+    ${rows}
+    <p class="aud-note">${esc(a.disclosure)}</p></div>`;
 }
 
 function sigMixHtml(z) {

@@ -50,7 +50,7 @@ def get_engine():
 
 
 def _run(job_id: str, path: Path, zones: list, cost_map: dict, is_video: bool,
-         sample_fps: int, crowd_mode: str):
+         sample_fps: int, crowd_mode: str, demographics: bool):
     job = jobs[job_id]
     try:
         job["status"] = "loading-model"
@@ -58,9 +58,11 @@ def _run(job_id: str, path: Path, zones: list, cost_map: dict, is_video: bool,
         job["status"] = "processing"
         if is_video:
             report = eng.process_video(path, zones, job, cost_map,
-                                       sample_fps=sample_fps, crowd_mode=crowd_mode)
+                                       sample_fps=sample_fps, crowd_mode=crowd_mode,
+                                       demographics=demographics)
         else:
-            report = eng.process_image(path, zones, job, cost_map, crowd_mode=crowd_mode)
+            report = eng.process_image(path, zones, job, cost_map, crowd_mode=crowd_mode,
+                                       demographics=demographics)
         job["report"] = report
         job["progress"] = 100
         job["status"] = "done"
@@ -116,7 +118,7 @@ def _get_job(job_id: str):
 @app.post("/api/analyze")
 async def analyze(file: UploadFile = File(...), zones: str = Form(...),
                   costs: str = Form("{}"), sample_fps: int = Form(10),
-                  crowd_mode: str = Form("auto")):
+                  crowd_mode: str = Form("auto"), demographics: str = Form("off")):
     zs = json.loads(zones)
     if not zs:
         raise HTTPException(400, "at least one zone required")
@@ -131,7 +133,8 @@ async def analyze(file: UploadFile = File(...), zones: str = Form(...),
     jobs[job_id] = {"status": "queued", "progress": 0, "preview": None,
                     "live": None, "report": None, "created": time.time()}
     threading.Thread(target=_run,
-                     args=(job_id, path, zs, json.loads(costs), is_video, sample_fps, crowd_mode),
+                     args=(job_id, path, zs, json.loads(costs), is_video, sample_fps,
+                           crowd_mode, demographics == "on"),
                      daemon=True).start()
     return {"job_id": job_id}
 

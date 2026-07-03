@@ -408,6 +408,17 @@ class AttentionEngine:
         hh = max(float(h), 20.0)
         d["cone"] = round(min(16.0, 8.0 + 350.0 / hh) if d["sig"] == "head"
                           else min(20.0, 11.0 + 350.0 / hh), 1)
+        # yüz kutusu (audience insights için): görünür yüz keypoint'lerinden
+        if raw["kp"] is not None:
+            kp, kc = raw["kp"], raw["kc"]
+            pts = [kp[i] for i in (NOSE, L_EYE, R_EYE, L_EAR, R_EAR) if kc[i] >= 0.3]
+            if len(pts) >= 3:
+                cx = sum(p[0] for p in pts) / len(pts)
+                cy = sum(p[1] for p in pts) / len(pts)
+                span = max(max(p[0] for p in pts) - min(p[0] for p in pts),
+                           max(p[1] for p in pts) - min(p[1] for p in pts), h * 0.18)
+                half = span * 1.1
+                d["face_box"] = (cx - half, cy - half, half * 2, half * 2.2)
         return d
 
     def _detect_frame(self, frame, tiled, tracker):
@@ -433,7 +444,7 @@ class AttentionEngine:
 
     # ---------- video ----------
     def process_video(self, path, zones, job, cost_map=None, sample_fps=10,
-                      max_seconds=None, crowd_mode="auto"):
+                      max_seconds=None, crowd_mode="auto", demographics=False):
         cap = cv2.VideoCapture(str(path))
         src_fps = cap.get(cv2.CAP_PROP_FPS) or 25
         n_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
@@ -570,6 +581,9 @@ class AttentionEngine:
                 except Exception:
                     scene = None
 
+            if demographics:
+                demographics = self._gender_pass(frame, dets, persons)  # hata -> kapanır
+
             annotated = self._draw(frame, dets, zs, heat, t, len(persons), tiled,
                                    scene=scene, zquads=zquads)
             writer.write(annotated)
@@ -602,6 +616,9 @@ class AttentionEngine:
         report["calibration"] = self._cal.state()
         self._attach_scene3d(report, sim_frame_img if sim_frame_img is not None else frame,
                              foot_samples, persons, zs, job, prebuilt=scene)
+        if demographics and persons:
+            from server import demographics as demo
+            report["audience"] = demo.aggregate(persons, zs, self.min_dwell)
         if density:
             report["density_timeline"] = [
                 {"t": b, "avg": round(s / max(f, 1), 1)} for b, (s, f) in sorted(density.items())]
@@ -610,7 +627,8 @@ class AttentionEngine:
         return report
 
     # ---------- image ----------
-    def process_image(self, path, zones, job, cost_map=None, crowd_mode="auto"):
+    def process_image(self, path, zones, job, cost_map=None, crowd_mode="auto",
+                      demographics=False):
         frame = cv2.imread(str(path))
         H, W = frame.shape[:2]
         tiled = self._use_tiles(W, H, crowd_mode)
@@ -668,6 +686,11 @@ class AttentionEngine:
         for i, d in enumerate(dets):  # fotoda kişi ayağı = tek örnek
             persons[i]["foot_sum"] = [foot_samples[i][0], foot_samples[i][1], 1]
         self._attach_scene3d(report, frame, foot_samples, persons, zs, job)
+        if demographics and persons:
+            id_persons = {d["id"]: persons[i] for i, d in enumerate(dets)}
+            if self._gender_pass(frame, dets, id_persons):
+                from server import demographics as demo
+                report["audience"] = demo.aggregate(persons, zs, 0.5)
         # foto çıktısını 3D overlay ile yeniden bas (ızgara + halkalar + metre etiketi)
         try:
             from server.scene3d import SceneModel
@@ -683,6 +706,36 @@ class AttentionEngine:
         except Exception:
             pass
         return report
+
+    # ---------- audience (opt-in, toplu) ----------
+    def _gender_pass(self, frame, dets, persons):
+        """Görünür-yüzlü kişilere gender oyu ekler. Hata olursa özelliği kapatır."""
+        try:
+            from server import demographics as demo
+            batch, refs = [], []
+            for d in dets:
+                p = persons.get(d["id"])
+                if p is None:
+                    continue
+                gv = p.setdefault("gender_votes", {})
+                if sum(gv.values()) >= 4:      # kişi başına yeterli oy toplandı
+                    continue
+                fb = d.get("face_box")
+                if not fb or fb[2] < demo.MIN_FACE_PX or fb[3] < demo.MIN_FACE_PX:
+                    continue
+                x, y, w, h = [int(v) for v in fb]
+                crop = frame[max(0, y):max(0, y) + h, max(0, x):max(0, x) + w]
+                if crop.size == 0 or crop.shape[0] < 20 or crop.shape[1] < 20:
+                    continue
+                batch.append(crop)
+                refs.append(gv)
+            if batch:
+                for (lbl, score), gv in zip(demo.classify(batch), refs):
+                    if score >= demo.MIN_SCORE:
+                        gv[lbl] = gv.get(lbl, 0.0) + score
+            return True
+        except Exception:
+            return False
 
     # ---------- scene3d ----------
     def _attach_scene3d(self, report, frame, foot_samples, persons, zs, job, prebuilt=None):
