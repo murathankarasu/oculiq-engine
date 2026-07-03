@@ -298,4 +298,13 @@ async def cancel(job_id: str):
     return {"ok": True}
 
 
+@app.middleware("http")
+async def no_static_cache(request, call_next):
+    """UI dosyaları güncellenince tarayıcı bayat CSS/JS kullanmasın."""
+    resp = await call_next(request)
+    if request.url.path.endswith((".css", ".js", ".html")) or request.url.path == "/":
+        resp.headers["Cache-Control"] = "no-cache"
+    return resp
+
+
 app.mount("/", StaticFiles(directory=ROOT / "web", html=True), name="web")
