@@ -887,7 +887,7 @@ function audienceHtml(rep) {
   return `<div class="wide-chart aud">
     <h4>Audience insights <span class="new-tag">BETA</span> — coverage ${fmt(a.coverage_pct, 0)}% of people had a classifiable face</h4>
     ${rows}
-    <p class="aud-note">${esc(a.disclosure)}</p></div>`;
+    <p class="aud-note">${a.note ? esc(a.note) + " " : ""}${esc(a.disclosure)}</p></div>`;
 }
 
 function sigMixHtml(z) {

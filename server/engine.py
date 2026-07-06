@@ -412,7 +412,7 @@ class AttentionEngine:
         # yüz kutusu (audience insights için): görünür yüz keypoint'lerinden
         if raw["kp"] is not None:
             kp, kc = raw["kp"], raw["kc"]
-            pts = [kp[i] for i in (NOSE, L_EYE, R_EYE, L_EAR, R_EAR) if kc[i] >= 0.3]
+            pts = [kp[i] for i in (NOSE, L_EYE, R_EYE, L_EAR, R_EAR) if kc[i] >= 0.25]
             if len(pts) >= 3:
                 cx = sum(p[0] for p in pts) / len(pts)
                 cy = sum(p[1] for p in pts) / len(pts)
@@ -848,6 +848,16 @@ class AttentionEngine:
                 sm = SceneModel().build(frame, foot_samples)
             report["scene3d"] = sm.state()
             if not sm.enabled:
+                return
+            # rekonstrüksiyon görüntüsü (tanı amaçlı — foto dahil her iş için)
+            if not job.get("scene_view"):
+                view = sm.render_view()
+                if view is not None:
+                    vp = Path(job.get("out_video") or job.get("out_image") or "x").parent / "input.scene.jpg"
+                    cv2.imwrite(str(vp), view)
+                    job["scene_view"] = str(vp)
+            # GÜVEN KAPISI: kalibrasyon güvenilmezse 3D türevli rakamlar RAPORA GİRMEZ
+            if not sm.reliable():
                 return
             # bölge 3D'si + izleme mesafesi (bakanların ortalama ayak konumundan)
             for z, zr in zip(zs, report["zones"]):

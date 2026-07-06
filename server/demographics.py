@@ -131,6 +131,10 @@ def aggregate(persons, zs, min_dwell):
         "disclosure": ("Estimates from visible faces only; aggregate percentages, "
                        "no per-person data stored or exported, no images retained."),
     }
+    if known == 0:
+        out["note"] = ("No classifiable faces in this footage — faces were too small, "
+                       "occluded or not frontal enough (min face 24px). "
+                       "Closer/higher-res footage improves coverage.")
     for z in zs:
         lookers = [pid for pid in ids if persons[pid]["dwell"][z["id"]] >= min_dwell]
         if lookers:
