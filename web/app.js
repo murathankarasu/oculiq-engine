@@ -234,6 +234,7 @@ async function startAnalysis() {
   fd.append("demographics", $("demoMode").checked ? "on" : "off");
   fd.append("face_blur", $("blurMode").checked ? "on" : "off");
 
+  $("procLog").innerHTML = "";
   let res;
   try {
     res = await fetch("/api/analyze", { method: "POST", body: fd });
@@ -251,6 +252,7 @@ async function startAnalysis() {
     setProgress(m.progress || 0);
     if (m.frame) $("livePreview").src = "data:image/jpeg;base64," + m.frame;
     if (m.live) renderLiveCards(m.live);
+    if (m.log) renderProcLog(m.log);
     if (m.status === "done") { es.close(); loadReport(job_id); }
   };
   es.onerror = () => { /* transient; EventSource retries */ };
@@ -260,6 +262,15 @@ function setProgress(p) {
   $("pct").textContent = p;
   const C = 326.7;
   $("ringFg").style.strokeDashoffset = C - (C * p) / 100;
+}
+
+function renderProcLog(log) {
+  const el = $("procLog");
+  if (!el || !log.length) return;
+  const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 30;
+  el.innerHTML = log.map((e) =>
+    `<div class="pl-line pl-${e.lv}"><span class="pl-t">${e.t}</span>${esc(e.m)}</div>`).join("");
+  if (atBottom) el.scrollTop = el.scrollHeight;
 }
 
 function renderLiveCards(live) {

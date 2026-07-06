@@ -25,6 +25,14 @@ from pathlib import Path
 import cv2
 import numpy as np
 
+
+def _jlog(job, msg, level="info"):
+    from server.main import job_log
+    try:
+        job_log(job, msg, level)
+    except Exception:
+        pass
+
 MODELS_DIR = Path(__file__).resolve().parent.parent / "models"
 
 # COCO keypoint indices
@@ -458,7 +466,11 @@ class AttentionEngine:
         stride = max(1, round(src_fps / sample_fps))
         dt = stride / src_fps
 
+        _jlog(job, f"Video {W}x{H} · {duration:.1f}s @ {src_fps:.1f}fps — sampling {sample_fps}fps, real frame timestamps (VFR-safe)")
         tiled = self._use_tiles(W, H, crowd_mode)
+        _jlog(job, f"Scan mode: {'tiled multi-scan (crowd)' if tiled else 'single-pass'}")
+        if face_blur:
+            _jlog(job, "GDPR: face blurring active on all outputs")
         tracker = SimpleTracker(max_gone=int(2.0 / dt))  # ~2s memory
         self._cal = KCalibrator(H, fallback=self.persp_k)  # oto perspektif kalibrasyonu
         foot_samples = []  # scene3d icin: (foot_u, foot_v, h_px)
@@ -481,11 +493,14 @@ class AttentionEngine:
             try:
                 from server import demographics as demo
                 job["status"] = "loading-model"
+                _jlog(job, "Loading audience classifiers (gender+age — first run downloads ~700MB)…")
                 demo.preload()
+                _jlog(job, "Audience classifiers ready", "ok")
                 job["status"] = "processing"
             except Exception as e:
                 demographics = False
                 demo_note = f"gender model unavailable: {type(e).__name__}: {e}"
+                _jlog(job, f"Audience classifiers FAILED: {e}", "err")
 
 
         out_path = Path(path).with_suffix(".annotated.mp4")
@@ -525,6 +540,7 @@ class AttentionEngine:
                 first_checked = True
                 if not tiled and crowd_mode == "auto" and len(dets) >= 10:
                     tiled = True
+                    _jlog(job, f"{len(dets)} people in first frame — auto-switching to tiled multi-scan")
                     dets = self._detect_frame(frame, tiled, tracker)
 
             peak = max(peak, len(dets))
@@ -546,8 +562,17 @@ class AttentionEngine:
                 try:
                     from server.scene3d import SceneModel
                     job["status"] = "scene-3d"
+                    _jlog(job, "Reconstructing 3D scene (metric depth model)…")
                     scene = SceneModel().build(sim_frame_img, foot_samples)
                     scene_ok = scene.reliable()   # GÜVEN KAPISI: düşükse 3D devre dışı
+                    if scene.enabled:
+                        _jlog(job,
+                              f"3D calibration: {scene.confidence:.0f}% confidence — "
+                              + ("ACTIVE (3D gaze + 3D zones)" if scene_ok
+                                 else "too low, falling back to 2.5D (honest mode)"),
+                              "ok" if scene_ok else "warn")
+                    else:
+                        _jlog(job, f"3D scene unavailable: {scene.note}", "warn")
                     if scene.enabled:
                         view = scene.render_view()   # LiDAR-tarzı rekonstrüksiyon (tanı)
                         if view is not None:
@@ -557,9 +582,12 @@ class AttentionEngine:
                     if scene_ok:
                         scene._grid = scene.grid_segments()
                         zquads = {z["id"]: scene.zone_quad(z["rect"]) for z in zs}
-                        for q in zquads.values():   # yüzey mesh'i bir kez hesapla
+                        for zz, q in zip(zs, zquads.values()):   # yüzey mesh'i bir kez hesapla
                             if q:
                                 q["_mesh"], q["_nseg"] = scene.zone_mesh(q)
+                                _jlog(job, f"{zz['label']}: placed on 3D surface — "
+                                           f"{q['w_m']}x{q['h_m']}m @ {q['depth_m']}m"
+                                           + (f", tilt {q['tilt_deg']:.0f}°" if q.get('tilt_deg') is not None else ""), "ok")
                     job["status"] = "processing"
                 except Exception:
                     scene = None
@@ -667,13 +695,18 @@ class AttentionEngine:
 
             if fi % (stride * 3) < stride:
                 job["preview"] = self._jpeg_b64(annotated, 960)
-            job["progress"] = min(99, int(t / max(duration, 0.1) * 100))
+            new_pct = min(99, int(t / max(duration, 0.1) * 100))
+            for ms in (25, 50, 75):
+                if job["progress"] < ms <= new_pct:
+                    _jlog(job, f"{ms}% — {len(persons)} people tracked so far")
+            job["progress"] = new_pct
             job["live"] = self._live(persons, zs, t)
             if job.get("cancel"):
                 break
 
         cap.release()
         writer.release()
+        _jlog(job, "Annotated video rendered — building report…")
         job["out_video"] = str(out_path)
         if not sim_frame_saved and "preview" in job:  # çok kısa video: eldeki kareyi kullan
             sf = Path(path).with_suffix(".sim.jpg")

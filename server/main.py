@@ -49,12 +49,22 @@ def get_engine():
         return _engine
 
 
+def job_log(job, msg, level="info"):
+    """Analiz ekranındaki canlı işlem günlüğü (SSE ile akar)."""
+    job.setdefault("log", []).append(
+        {"t": time.strftime("%H:%M:%S"), "lv": level, "m": msg})
+
+
 def _run(job_id: str, path: Path, zones: list, cost_map: dict, is_video: bool,
          sample_fps: int, crowd_mode: str, demographics: bool, face_blur: bool):
     job = jobs[job_id]
+    t_start = time.time()
     try:
         job["status"] = "loading-model"
+        job_log(job, "Job accepted — input saved, preparing engine")
+        job_log(job, "Loading detection model (YOLO11x-pose + ByteTrack)…")
         eng = get_engine()
+        job_log(job, "Detection model ready", "ok")
         job["status"] = "processing"
         if is_video:
             report = eng.process_video(path, zones, job, cost_map,
@@ -67,9 +77,11 @@ def _run(job_id: str, path: Path, zones: list, cost_map: dict, is_video: bool,
         job["progress"] = 100
         job["status"] = "done"
         _save(job_id)
+        job_log(job, f"Done in {time.time() - t_start:.1f}s — report saved", "ok")
     except Exception as e:  # surfaced to UI
         job["status"] = "error"
         job["error"] = f"{type(e).__name__}: {e}"
+        job_log(job, f"FAILED: {type(e).__name__}: {e}", "err")
 
 
 def _save(job_id: str):
@@ -132,7 +144,7 @@ async def analyze(file: UploadFile = File(...), zones: str = Form(...),
     is_video = (file.content_type or "").startswith("video")
 
     jobs[job_id] = {"status": "queued", "progress": 0, "preview": None,
-                    "live": None, "report": None, "created": time.time()}
+                    "live": None, "report": None, "created": time.time(), "log": []}
     threading.Thread(target=_run,
                      args=(job_id, path, zs, json.loads(costs), is_video, sample_fps,
                            crowd_mode, demographics == "on", face_blur != "off"),
@@ -149,7 +161,8 @@ async def events(job_id: str):
         last_preview = None
         while True:
             job = jobs[job_id]
-            msg = {"status": job["status"], "progress": job["progress"], "live": job["live"]}
+            msg = {"status": job["status"], "progress": job["progress"], "live": job["live"],
+                   "log": job.get("log", [])}
             if job["preview"] and job["preview"] != last_preview:
                 msg["frame"] = job["preview"]
                 last_preview = job["preview"]
