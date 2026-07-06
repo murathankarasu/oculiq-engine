@@ -96,14 +96,9 @@ class SceneModel:
             if 0.5 < Z < 200:
                 obs.append((float(h_px), Z))
         self.samples = len(obs)
+        self.inliers = 0
         if self.samples >= 3:
-            f_est = [h * Z / MEAN_PERSON_M for h, Z in obs]
-            self.f = float(np.median(f_est))
-            heights = [h * Z / self.f for h, Z in obs]
-            self.height_mean = float(np.mean(heights))
-            self.height_std = float(np.std(heights))
-            # std 0m -> %100, 0.35m -> %0 (kaba ama durust bir olcek)
-            self.confidence = round(max(0.0, min(1.0, 1.0 - self.height_std / 0.35)) * 100, 1)
+            self._fit_focal(obs)
         else:
             self.f = 0.9 * self.W  # tipik CCTV varsayilani
             self.note = "insufficient people for focal self-check"
@@ -134,6 +129,32 @@ class SceneModel:
             self.note = (self.note + "; " if self.note else "") + "ground plane: too few foot points"
 
         self.enabled = True
+
+    def _fit_focal(self, obs):
+        """Iki gecisli saglam odak kestirimi — CCTV gercekligi icin.
+        1. gecis: medyan f; boylar hesaplanir, [1.15m, 2.25m] disi AYKIRI sayilir
+        (kesik govde, cocuk arabasi, yanlis derinlik...). 2. gecis: yalnizca
+        inlier'larla f yeniden; guven, inlier boy sacilimindan (0.25m olcek) +
+        inlier orani cezasiyla."""
+        f0 = float(np.median([h * Z / MEAN_PERSON_M for h, Z in obs]))
+        heights0 = [(h * Z / f0, h, Z) for h, Z in obs]
+        inl = [(h, Z) for (ht, h, Z) in heights0 if 1.15 <= ht <= 2.25]
+        self.inliers = len(inl)
+        if len(inl) >= 3:
+            self.f = float(np.median([h * Z / MEAN_PERSON_M for h, Z in inl]))
+            heights = [h * Z / self.f for h, Z in inl]
+            self.height_mean = float(np.mean(heights))
+            self.height_std = float(np.std(heights))
+            spread_conf = max(0.0, min(1.0, 1.0 - self.height_std / 0.25))
+            ratio = len(inl) / max(len(obs), 1)
+            ratio_pen = min(1.0, ratio / 0.5)   # inlier orani <%50 ise cezalandir
+            self.confidence = round(spread_conf * ratio_pen * 100, 1)
+        else:
+            self.f = f0
+            self.height_mean = float(np.mean([ht for ht, _, _ in heights0]))
+            self.height_std = float(np.std([ht for ht, _, _ in heights0]))
+            self.confidence = 0.0
+            self.note = "height self-check found no consistent full-body samples"
 
     # ---------- geometri ----------
     def backproject(self, u, v, Z):
@@ -267,11 +288,7 @@ class SceneModel:
                 obs.append((float(h_px), Z))
         if len(obs) >= 3:
             self.samples = len(obs)
-            self.f = float(np.median([h * Z / MEAN_PERSON_M for h, Z in obs]))
-            heights = [h * Z / self.f for h, Z in obs]
-            self.height_mean = float(np.mean(heights))
-            self.height_std = float(np.std(heights))
-            self.confidence = round(max(0.0, min(1.0, 1.0 - self.height_std / 0.35)) * 100, 1)
+            self._fit_focal(obs)
         return self
 
     # ---------- görselleştirme (AR-tarzı) ----------
@@ -484,6 +501,7 @@ class SceneModel:
              "model": "Depth Anything V2 metric (outdoor, small)",
              "focal_px": round(self.f, 1) if self.f else None,
              "calib_confidence": self.confidence,
+             "inliers": getattr(self, "inliers", 0),
              "reliable": self.reliable(),
              "gate": "active" if self.reliable() else "fallback-2.5d (low confidence)",
              "samples": self.samples}

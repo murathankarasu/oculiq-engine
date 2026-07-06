@@ -213,8 +213,8 @@ class KCalibrator:
 class AttentionEngine:
     def __init__(self, model_name="yolo11x-pose.pt", cone_deg=35.0, min_dwell=0.4,
                  kp_conf=0.35, min_mag=0.10, imgsz=960, tile_imgsz=896,
-                 tile_px=800, det_conf=0.18,
-                 tile_overlap=0.2, merge_iou=0.55, smooth_n=3, min_sightings=2):
+                 tile_px=800, det_conf=0.25,
+                 tile_overlap=0.2, merge_iou=0.5, smooth_n=3, min_sightings=3):
         from ultralytics import YOLO
         MODELS_DIR.mkdir(exist_ok=True)
         path = MODELS_DIR / model_name
@@ -417,6 +417,13 @@ class AttentionEngine:
         hh = max(float(h), 20.0)
         d["cone"] = round(min(16.0, 8.0 + 350.0 / hh) if d["sig"] == "head"
                           else min(20.0, 11.0 + 350.0 / hh), 1)
+        # tam-boy bayrağı: 3D kalibrasyon yalnızca tam görünen kişilerden beslenir
+        # (kesik/oturan/şemsiyeli gövdeler boy örneklemini zehirliyordu)
+        d["fb_ok"] = False
+        if raw["kp"] is not None:
+            kc_ = raw["kc"]
+            d["fb_ok"] = bool((kc_[15] >= 0.3 or kc_[16] >= 0.3)
+                              and (kc_[0] >= 0.3 or kc_[1] >= 0.3 or kc_[2] >= 0.3))
         # yüz kutusu (audience insights için): görünür yüz keypoint'lerinden
         if raw["kp"] is not None:
             kp, kc = raw["kp"], raw["kc"]
@@ -566,8 +573,12 @@ class AttentionEngine:
                     scene = SceneModel().build(sim_frame_img, foot_samples)
                     scene_ok = scene.reliable()   # GÜVEN KAPISI: düşükse 3D devre dışı
                     if scene.enabled:
+                        hm = scene.height_mean
                         _jlog(job,
-                              f"3D calibration: {scene.confidence:.0f}% confidence — "
+                              f"3D calibration: {len(foot_samples)} full-body samples, "
+                              f"{getattr(scene, 'inliers', 0)} inliers"
+                              + (f" → height {hm:.2f}m ± {scene.height_std:.2f}" if hm else "")
+                              + f" → {scene.confidence:.0f}% — "
                               + ("ACTIVE (3D gaze + 3D zones)" if scene_ok
                                  else "too low, falling back to 2.5D (honest mode)"),
                               "ok" if scene_ok else "warn")
@@ -628,7 +639,8 @@ class AttentionEngine:
                 # scene3d örnekleri + kişinin ortalama ayak noktası
                 bx, by, bw, bh = d["box"]
                 foot = (bx + bw / 2.0, by + float(bh))
-                if len(foot_samples) < 400:
+                if (len(foot_samples) < 400 and d.get("fb_ok")
+                        and foot[1] < H - 4 and bh >= 40):
                     foot_samples.append((foot[0], foot[1], float(bh)))
                 fs = p.setdefault("foot_sum", [0.0, 0.0, 0])
                 fs[0] += foot[0]; fs[1] += foot[1]; fs[2] += 1
@@ -802,7 +814,11 @@ class AttentionEngine:
         report["calibration"] = self._cal.state()
         foot_samples = [(d["box"][0] + d["box"][2] / 2.0,
                          d["box"][1] + float(d["box"][3]), float(d["box"][3]))
-                        for d in dets]
+                        for d in dets if d.get("fb_ok") and d["box"][3] >= 40]
+        if len(foot_samples) < 4:   # tam-boy yoksa eski davranış (foto)
+            foot_samples = [(d["box"][0] + d["box"][2] / 2.0,
+                             d["box"][1] + float(d["box"][3]), float(d["box"][3]))
+                            for d in dets]
         for i, d in enumerate(dets):  # fotoda kişi ayağı = tek örnek
             persons[i]["foot_sum"] = [foot_samples[i][0], foot_samples[i][1], 1]
         self._attach_scene3d(report, frame, foot_samples, persons, zs, job)
