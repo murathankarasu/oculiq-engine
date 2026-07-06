@@ -558,7 +558,21 @@ class AttentionEngine:
             # what-if arka planı: video ~%25'indeyken temiz (overlay'siz) bir kare sakla
             if not sim_frame_saved and t >= duration * 0.25:
                 sf = Path(path).with_suffix(".sim.jpg")
-                cv2.imwrite(str(sf), frame)
+                sim_save = frame.copy()
+                if face_blur:   # GDPR: what-if arka planinda da yuz kalmasin
+                    for d in dets:
+                        fb = d.get("face_box")
+                        if not fb:
+                            continue
+                        x0 = max(0, int(fb[0])); y0 = max(0, int(fb[1]))
+                        x1 = min(W, int(fb[0] + fb[2])); y1 = min(H, int(fb[1] + fb[3]))
+                        if x1 - x0 < 4 or y1 - y0 < 4:
+                            continue
+                        roi = sim_save[y0:y1, x0:x1]
+                        sm = cv2.resize(roi, (max(2, (x1 - x0) // 10), max(2, (y1 - y0) // 10)))
+                        sim_save[y0:y1, x0:x1] = cv2.resize(sm, (x1 - x0, y1 - y0),
+                                                            interpolation=cv2.INTER_NEAREST)
+                cv2.imwrite(str(sf), sim_save)
                 job["sim_frame"] = str(sf)
                 sim_frame_img = frame.copy()
                 sim_frame_saved = True

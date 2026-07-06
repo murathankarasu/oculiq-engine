@@ -32,6 +32,11 @@
     </div>
 
     <div class="set-sec">
+      <h4>Compliance (GDPR · EU AI Act · KVKK)</h4>
+      <p class="set-note">Gender/age estimation is <b>lawful in the EU</b> when done like Oculiq does it: on-device, no images retained, aggregate-only output, no unique identification. It is <b>not</b> a prohibited AI Act category (those are race, political opinion, religion, sexual orientation) and per Commission guidance is not high-risk. Your duties as operator: <b>inform people</b> in the monitored area (AI Act Art. 50), run a DPIA for systematic public-space monitoring, and keep retention minimal. Oculiq enforces k-anonymity: splits for groups under 5 people are suppressed automatically. Suggested venue notice: <i>"This area uses anonymous, on-device audience measurement (attention + aggregate demographics). No images or identities are stored. Contact: [operator]".</i></p>
+    </div>
+
+    <div class="set-sec">
       <h4>How measurement works</h4>
       <p class="set-note">People are detected with YOLO11-pose and tracked with persistent IDs. Attention is <b>orientation-based</b>: head pose when the face is visible (confidence 0.85), body orientation from shoulder geometry when it isn't (confidence 0.5) — including people with their back to the camera. A person "looks" at a zone when their direction falls inside an attention cone for ≥0.4s. Perspective is auto-calibrated per camera from how people shrink with distance. Rates ship with 95% confidence intervals. This is honest proxy measurement, not eye-tracking.</p>
     </div>
@@ -154,6 +159,6 @@
     </section>
   </main>
 
-  <script type="module" src="app.js?v=7"></script>
+  <script type="module" src="app.js?v=8"></script>
 </body>
 </html>

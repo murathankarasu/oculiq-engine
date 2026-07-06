@@ -866,6 +866,7 @@ function audienceHtml(rep) {
   }
   if (!a.enabled) return "";
   const bar = (s) => {
+    if (s && s.suppressed) return `<div class="bar-line" style="height:14px"><div style="width:100%;background:rgba(255,255,255,.06)"></div></div>`;
     const n = (s.female || 0) + (s.male || 0) + (s.unknown || 0) || 1;
     const f = (s.female / n) * 100, m = (s.male / n) * 100, u = (s.unknown / n) * 100;
     return `<div class="bar-line" style="height:14px">
@@ -873,9 +874,13 @@ function audienceHtml(rep) {
       <div style="width:${m}%;background:rgba(255,255,255,.45)" title="male"></div>
       <div style="width:${u}%;background:rgba(255,255,255,.12)" title="unknown"></div></div>`;
   };
-  const legend = (s) => `<small>${s.female} female · ${s.male} male · ${s.unknown} unknown</small>`;
+  const legend = (s) => s && s.suppressed
+    ? `<small>hidden — group of ${s.n} too small to report safely (k-anonymity, min 5)</small>`
+    : `<small>${s.female} female · ${s.male} male · ${s.unknown} unknown</small>`;
   let rows = `<div class="aud-row"><span class="k" title="${GLOSS["Audience insights"]}">Traffic</span>${bar(a.traffic_split)}${legend(a.traffic_split)}</div>`;
-  if (a.age_split && a.age_order) {
+  if (a.age_split && a.age_split.suppressed) {
+    rows += `<div class="aud-row"><span class="k">Age (est.)</span><div class="bar-line" style="height:14px"><div style="width:100%;background:rgba(255,255,255,.06)"></div></div><small>hidden — group too small (k-anonymity)</small></div>`;
+  } else if (a.age_split && a.age_order) {
     const shades = ["#ffffff", "rgba(255,255,255,.8)", "rgba(255,255,255,.62)", "rgba(255,255,255,.46)", "rgba(255,255,255,.32)", "rgba(255,255,255,.2)", "rgba(255,255,255,.55)"];
     const tot = a.age_order.reduce((s, b) => s + (a.age_split[b] || 0), 0) + (a.age_split.unknown || 0);
     if (tot) {

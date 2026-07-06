@@ -25,6 +25,8 @@ AGE_MAP = {"0-2": "0-12", "3-9": "0-12", "10-19": "13-19", "20-29": "20-29",
            "30-39": "30-39", "40-49": "40-49", "50-59": "50-59",
            "60-69": "60+", "more than 70": "60+"}
 AGE_ORDER = ["0-12", "13-19", "20-29", "30-39", "40-49", "50-59", "60+"]
+MIN_GROUP = 5             # k-anonimlik: bundan kucuk grubun dagilimi RAPORLANMAZ
+                          # (3 kiside "1 kadin" demek kisiyi isaret eder — GDPR singling-out)
 _pipe = None
 _pipe_age = None
 
@@ -116,6 +118,13 @@ def aggregate(persons, zs, min_dwell):
                 s["unknown"] += 1
         return s
 
+    def guard(s):
+        """Siniflandirilan grup MIN_GROUP'tan kucukse dagilimi bastir."""
+        known_ = sum(v for k, v in s.items() if k != "unknown")
+        if 0 < known_ < MIN_GROUP:
+            return {"suppressed": True, "n": known_}
+        return s
+
     ids = list(persons)
     traffic = split(ids)
     n = len(ids) or 1
@@ -124,8 +133,8 @@ def aggregate(persons, zs, min_dwell):
         "enabled": True,
         "method": "on-device face-crop gender+age estimate (FairFace ViT) — aggregate only",
         "coverage_pct": round(known / n * 100, 1),
-        "traffic_split": traffic,
-        "age_split": age_split(ids),
+        "traffic_split": guard(traffic),
+        "age_split": guard(age_split(ids)),
         "age_order": AGE_ORDER,
         "zones": {},
         "disclosure": ("Estimates from visible faces only; aggregate percentages, "
@@ -138,6 +147,6 @@ def aggregate(persons, zs, min_dwell):
     for z in zs:
         lookers = [pid for pid in ids if persons[pid]["dwell"][z["id"]] >= min_dwell]
         if lookers:
-            out["zones"][str(z["id"])] = {"lookers_split": split(lookers),
+            out["zones"][str(z["id"])] = {"lookers_split": guard(split(lookers)),
                                           "n": len(lookers)}
     return out
