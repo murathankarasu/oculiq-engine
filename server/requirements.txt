@@ -7,3 +7,5 @@ opencv-python>=4.10
 reportlab>=4.0
 transformers>=4.45
 
+rtmlib>=0.0.13
+onnxruntime>=1.17

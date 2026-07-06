@@ -18,6 +18,7 @@ All processing on-device. Nothing leaves the machine.
 import base64
 import json
 import math
+import os
 import time
 from collections import defaultdict, deque
 from pathlib import Path
@@ -243,6 +244,9 @@ class AttentionEngine:
         self._cal = None     # aktif işin KCalibrator'ı (process_* başında kurulur)
         self.auto_cone = True  # koni otomatiği: kişisel gürültü + bölge açısal genişliği
         self._demo_err = None
+        self.use_rtmo = os.environ.get("OCULIQ_RTMO", "on") != "off"
+        self._rtmo = None          # kalabalık modu: RTMO tek-geçiş (yüklenemezse tiled YOLO)
+        self._rtmo_failed = False
 
     # ---------- orientation ----------
     # Sinyal zinciri (yakından uzağa):
@@ -439,6 +443,16 @@ class AttentionEngine:
 
     def _detect_frame(self, frame, tiled, tracker):
         if tiled:
+            if self.use_rtmo and not self._rtmo_failed:
+                try:
+                    if self._rtmo is None:
+                        from server.pose_rtmo import RtmoDetector
+                        self._rtmo = RtmoDetector()
+                    raws = self._rtmo.detect(frame)
+                    ids = tracker.update(raws)
+                    return [self._build_det(r, i) for r, i in zip(raws, ids)]
+                except Exception:
+                    self._rtmo_failed = True   # sessizce parçalı YOLO'ya dön
             raws = self._detect_tiled(frame)
             ids = tracker.update(raws)
         else:
@@ -476,6 +490,16 @@ class AttentionEngine:
         _jlog(job, f"Video {W}x{H} · {duration:.1f}s @ {src_fps:.1f}fps — sampling {sample_fps}fps, real frame timestamps (VFR-safe)")
         tiled = self._use_tiles(W, H, crowd_mode)
         _jlog(job, f"Scan mode: {'tiled multi-scan (crowd)' if tiled else 'single-pass'}")
+        if tiled and self.use_rtmo and not self._rtmo_failed:
+            try:
+                if self._rtmo is None:
+                    from server.pose_rtmo import RtmoDetector
+                    _jlog(job, "Loading RTMO crowd-pose engine (one-stage, Apache-2.0)…")
+                    self._rtmo = RtmoDetector()
+                _jlog(job, "Crowd engine: RTMO one-stage — single pass replaces 7-pass tiling", "ok")
+            except Exception as e:
+                self._rtmo_failed = True
+                _jlog(job, f"RTMO unavailable ({e}) — falling back to tiled YOLO", "warn")
         if face_blur:
             _jlog(job, "GDPR: face blurring active on all outputs")
         tracker = SimpleTracker(max_gone=int(2.0 / dt))  # ~2s memory
