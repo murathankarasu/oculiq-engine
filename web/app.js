@@ -126,28 +126,43 @@ function initStage(W, H) {
   goto("zones");
 }
 
-/* ---------- zone drawing ---------- */
-let drawing = false, dragStart = null, dragCur = null, pending = null;
+/* ---------- zone drawing: reklamın 4 KÖŞESİNE tıkla (serbest dörtgen) ----------
+   Açılı çekilen billboard ekranda yamuktur; eksen-hizalı dikdörtgen fazla/eksik
+   alan kapsar. 4 köşe = gerçek yüzey; 3D yerleşim de gerçek köşeleri kullanır. */
+let placing = false, corners = [], hoverPt = null, pending = null;
 
 $("zoneBtn").onclick = () => {
+  placing = true; corners = []; hoverPt = null;
   draw.style.pointerEvents = "auto"; draw.style.cursor = "crosshair";
+  renderZones();
 };
 const normPt = (e) => {
   const r = draw.getBoundingClientRect();
   return { x: (e.clientX - r.left) / r.width, y: (e.clientY - r.top) / r.height };
 };
-draw.addEventListener("pointerdown", (e) => { drawing = true; dragStart = normPt(e); dragCur = dragStart; });
-draw.addEventListener("pointermove", (e) => { if (drawing) { dragCur = normPt(e); renderZones(); } });
-draw.addEventListener("pointerup", () => {
-  if (!drawing) return;
-  drawing = false;
-  const a = dragStart, b = dragCur;
-  const x = Math.min(a.x, b.x), y = Math.min(a.y, b.y);
-  const w = Math.abs(a.x - b.x), h = Math.abs(a.y - b.y);
-  draw.style.pointerEvents = "none"; draw.style.cursor = "default";
-  if (w < 0.01 || h < 0.01) { renderZones(); return; }
-  pending = { x, y, w, h };
-  openPop(x, y, w, h);
+draw.addEventListener("pointermove", (e) => {
+  if (placing && corners.length) { hoverPt = normPt(e); renderZones(); }
+});
+draw.addEventListener("pointerdown", (e) => {
+  if (!placing) return;
+  corners.push(normPt(e));
+  renderZones();
+  if (corners.length === 4) {
+    placing = false; hoverPt = null;
+    draw.style.pointerEvents = "none"; draw.style.cursor = "default";
+    // açıya göre sırala (basit/kesişmesiz çokgen garantisi)
+    const cx = corners.reduce((s, p) => s + p.x, 0) / 4;
+    const cy = corners.reduce((s, p) => s + p.y, 0) / 4;
+    const poly = [...corners].sort((a, b) =>
+      Math.atan2(a.y - cy, a.x - cx) - Math.atan2(b.y - cy, b.x - cx));
+    const xs = poly.map((p) => p.x), ys = poly.map((p) => p.y);
+    const x = Math.min(...xs), y = Math.min(...ys);
+    const w = Math.max(...xs) - x, h = Math.max(...ys) - y;
+    if (w < 0.01 || h < 0.01) { corners = []; renderZones(); return; }
+    pending = { poly: poly.map((p) => [p.x, p.y]), x, y, w, h };
+    corners = [];
+    openPop(x, y, w, h);
+  }
 });
 
 function openPop(x, y, w) {
@@ -177,25 +192,36 @@ $("zpSave").onclick = () => {
 $("zpCancel").onclick = () => { pending = null; $("zonePop").classList.add("hidden"); renderZones(); };
 $("zpLabel").addEventListener("keydown", (e) => { if (e.key === "Enter") $("zpSave").click(); });
 
+function polyPath(ctx2, poly, W, H) {
+  ctx2.beginPath();
+  poly.forEach(([px, py], i) => i ? ctx2.lineTo(px * W, py * H) : ctx2.moveTo(px * W, py * H));
+  ctx2.closePath();
+}
+
 function renderZones() {
   const W = draw.width, H = draw.height;
   dctx.clearRect(0, 0, W, H);
   for (const z of state.zones) {
     dctx.strokeStyle = z.color; dctx.lineWidth = Math.max(2, W / 480);
-    dctx.strokeRect(z.x * W, z.y * H, z.w * W, z.h * H);
+    if (z.poly) { polyPath(dctx, z.poly, W, H); dctx.stroke(); }
+    else dctx.strokeRect(z.x * W, z.y * H, z.w * W, z.h * H);
     dctx.fillStyle = z.color;
     dctx.font = `600 ${Math.max(13, W / 70)}px sans-serif`;
     dctx.fillText(z.label, z.x * W + 6, z.y * H - 7);
   }
-  if (drawing && dragStart && dragCur) {
+  if (placing && corners.length) {
     dctx.setLineDash([7, 5]); dctx.strokeStyle = "#fff"; dctx.lineWidth = 2;
-    dctx.strokeRect(Math.min(dragStart.x, dragCur.x) * W, Math.min(dragStart.y, dragCur.y) * H,
-      Math.abs(dragStart.x - dragCur.x) * W, Math.abs(dragStart.y - dragCur.y) * H);
+    dctx.beginPath();
+    corners.forEach((p, i) => i ? dctx.lineTo(p.x * W, p.y * H) : dctx.moveTo(p.x * W, p.y * H));
+    if (hoverPt) dctx.lineTo(hoverPt.x * W, hoverPt.y * H);
+    dctx.stroke();
     dctx.setLineDash([]);
+    dctx.fillStyle = "#fff";
+    for (const p of corners) { dctx.beginPath(); dctx.arc(p.x * W, p.y * H, Math.max(4, W / 300), 0, 6.283); dctx.fill(); }
   }
-  if (pending) {
+  if (pending && pending.poly) {
     dctx.setLineDash([7, 5]); dctx.strokeStyle = "#fff"; dctx.lineWidth = 2;
-    dctx.strokeRect(pending.x * W, pending.y * H, pending.w * W, pending.h * H);
+    polyPath(dctx, pending.poly, W, H); dctx.stroke();
     dctx.setLineDash([]);
   }
 }
@@ -228,7 +254,7 @@ async function startAnalysis() {
 
   const fd = new FormData();
   fd.append("file", state.file);
-  fd.append("zones", JSON.stringify(state.zones.map(({ id, label, type, x, y, w, h }) => ({ id, label, type, x, y, w, h }))));
+  fd.append("zones", JSON.stringify(state.zones.map(({ id, label, type, x, y, w, h, poly }) => ({ id, label, type, x, y, w, h, poly }))));
   fd.append("costs", JSON.stringify(Object.fromEntries(state.zones.map((z) => [z.id, z.cost]))));
   fd.append("crowd_mode", $("crowdMode").checked ? "on" : "auto");
   fd.append("demographics", $("demoMode").checked ? "on" : "off");
@@ -740,7 +766,12 @@ function initSim(rep, jobId) {
     for (const z of rep.zones) {
       const r = normToPx(z.norm, sim);
       ctx.setLineDash([8, 6]); ctx.strokeStyle = "rgba(255,255,255,.4)"; ctx.lineWidth = lw;
-      ctx.strokeRect(r.x, r.y, r.w, r.h); ctx.setLineDash([]);
+      if (z.poly) {
+        ctx.beginPath();
+        z.poly.forEach(([px, py], i) => i ? ctx.lineTo(px * sim.w, py * sim.h) : ctx.moveTo(px * sim.w, py * sim.h));
+        ctx.closePath(); ctx.stroke();
+      } else ctx.strokeRect(r.x, r.y, r.w, r.h);
+      ctx.setLineDash([]);
       ctx.fillStyle = "rgba(255,255,255,.55)"; ctx.font = `${fs}px sans-serif`;
       ctx.fillText(z.label, r.x + 6, r.y - 8);
     }

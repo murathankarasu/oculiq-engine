@@ -174,14 +174,16 @@ class SceneModel:
             return None
         return ray * t
 
-    def zone_quad(self, rect_px):
-        """Cizilen 2D dikdortgen -> GERCEK yuzeye oturtulmus yonlu 3D dortgen.
+    def zone_quad(self, z_or_rect):
+        """Cizilen bolge (4-kose poligon ya da dikdortgen) -> GERCEK yuzeye
+        oturtulmus yonlu 3D dortgen.
 
         Bolge icindeki derinlik noktalarina duzlem oturtulur (Z = aX + bY + c,
         aykiri ayiklamali — onunden gecen insanlar/parazit elenir); koseler kendi
         piksel isinlariyla o duzleme yerlestirilir. Acili duvar/billboard artik
         acili temsil edilir: normal + egim (tilt) cikar. Fit tutmazsa medyan
         derinlikli kameraya-paralel dortgene dusulur."""
+        rect_px = z_or_rect["rect"] if isinstance(z_or_rect, dict) else z_or_rect
         if self.depth is None or not self.f:
             return None
         x, y, w, h = [int(v) for v in rect_px]
@@ -230,7 +232,12 @@ class SceneModel:
                         return self.backproject(u, v, Z)
             return self.backproject(u, v, Zmed)
 
-        cns = [corner(x, y), corner(x2, y), corner(x2, y2), corner(x, y2)]
+        ppx = z_or_rect.get("poly_px") if isinstance(z_or_rect, dict) else None
+        if ppx:
+            cns = [corner(int(np.clip(u, 0, self.W - 1)), int(np.clip(v, 0, self.H - 1)))
+                   for (u, v) in ppx]
+        else:
+            cns = [corner(x, y), corner(x2, y), corner(x2, y2), corner(x, y2)]
         center = (cns[0] + cns[2]) / 2
         wm = float(np.linalg.norm(cns[1] - cns[0]))
         hm = float(np.linalg.norm(cns[3] - cns[0]))

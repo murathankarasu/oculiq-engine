@@ -630,7 +630,7 @@ class AttentionEngine:
                             job["scene_view"] = str(vp)
                     if scene_ok:
                         scene._grid = scene.grid_segments()
-                        zquads = {z["id"]: scene.zone_quad(z["rect"]) for z in zs}
+                        zquads = {z["id"]: scene.zone_quad(z) for z in zs}
                         for zz, q in zip(zs, zquads.values()):   # yüzey mesh'i bir kez hesapla
                             if q:
                                 q["_mesh"], q["_nseg"] = scene.zone_mesh(q)
@@ -872,7 +872,7 @@ class AttentionEngine:
                 sc = SceneModel().build(frame, foot_samples)
                 if sc.enabled and sc.reliable():
                     sc._grid = sc.grid_segments()
-                    zq = {z["id"]: sc.zone_quad(z["rect"]) for z in zs}
+                    zq = {z["id"]: sc.zone_quad(z) for z in zs}
                     for q in zq.values():
                         if q:
                             q["_mesh"], q["_nseg"] = sc.zone_mesh(q)
@@ -948,7 +948,7 @@ class AttentionEngine:
                 return
             # bölge 3D'si + izleme mesafesi (bakanların ortalama ayak konumundan)
             for z, zr in zip(zs, report["zones"]):
-                q = sm.zone_quad(z["rect"])
+                q = sm.zone_quad(z)
                 if not q:
                     continue
                 zr["size_m"] = [q["w_m"], q["h_m"]]
@@ -976,12 +976,20 @@ class AttentionEngine:
         out = []
         for i, z in enumerate(zones):
             x, y, w, h = z["x"] * W, z["y"] * H, z["w"] * W, z["h"] * H
+            poly = z.get("poly")
+            poly_px = None
+            center = (x + w / 2, y + h / 2)
+            if poly and len(poly) == 4:
+                poly_px = [(float(px) * W, float(py) * H) for px, py in poly]
+                center = (sum(p[0] for p in poly_px) / 4, sum(p[1] for p in poly_px) / 4)
             out.append({
                 "id": z.get("id", i), "label": z.get("label", f"Zone {i+1}"),
                 "type": z.get("type", "billboard"),
                 "rect": (int(x), int(y), int(w), int(h)),
                 "norm": (z["x"], z["y"], z["w"], z["h"]),
-                "center": (x + w / 2, y + h / 2),
+                "poly_px": poly_px,
+                "poly_norm": poly if poly and len(poly) == 4 else None,
+                "center": center,
                 "color": ZONE_COLORS[i % len(ZONE_COLORS)],
             })
         return out
@@ -1051,6 +1059,7 @@ class AttentionEngine:
                 "id": zid, "label": z["label"], "type": z["type"],
                 "color": "#%02x%02x%02x" % (z["color"][2], z["color"][1], z["color"][0]),
                 "norm": list(z["norm"]),
+                "poly": z.get("poly_norm"),
                 "traffic": traffic,
                 "impressions": imp,
                 "impressions_ci": [round(ci_lo * traffic), round(ci_hi * traffic)],
@@ -1147,8 +1156,13 @@ class AttentionEngine:
 
         for z in zs:
             x, y, w, h = z["rect"]
+            ppx = z.get("poly_px")
+            pts = np.array(ppx, np.int32) if ppx else None
             ov = out.copy()
-            cv2.rectangle(ov, (x, y), (x + w, y + h), z["color"], -1)
+            if pts is not None:
+                cv2.fillPoly(ov, [pts], z["color"])
+            else:
+                cv2.rectangle(ov, (x, y), (x + w, y + h), z["color"], -1)
             out = cv2.addWeighted(ov, 0.12, out, 0.88, 0)
             q = (zquads or {}).get(z["id"])
             # bölge yüzeye 3D oturmuş: tel-kafes + yüzey normali oku
@@ -1164,7 +1178,10 @@ class AttentionEngine:
                                     (12, 12, 12), max(3, int(2 * sc) + 2), cv2.LINE_AA, tipLength=0.3)
                     cv2.arrowedLine(out, (int(p1[0]), int(p1[1])), (int(p2[0]), int(p2[1])),
                                     z["color"], max(2, int(2 * sc)), cv2.LINE_AA, tipLength=0.3)
-            cv2.rectangle(out, (x, y), (x + w, y + h), z["color"], max(2, int(2 * sc)))
+            if pts is not None:
+                cv2.polylines(out, [pts], True, z["color"], max(2, int(2 * sc)), cv2.LINE_AA)
+            else:
+                cv2.rectangle(out, (x, y), (x + w, y + h), z["color"], max(2, int(2 * sc)))
             n_look = sum(1 for d in dets if d["zone"] == z["id"])
             label = f'{z["label"]}  |  {n_look} looking'
             if q:
