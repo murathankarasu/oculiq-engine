@@ -481,7 +481,7 @@ class AttentionEngine:
             try:
                 from server import demographics as demo
                 job["status"] = "loading-model"
-                demo._gp()
+                demo.preload()
                 job["status"] = "processing"
             except Exception as e:
                 demographics = False
@@ -809,6 +809,7 @@ class AttentionEngine:
                 if p is None:
                     continue
                 gv = p.setdefault("gender_votes", {})
+                av = p.setdefault("age_votes", {})
                 if sum(gv.values()) >= 4:      # kişi başına yeterli oy toplandı
                     continue
                 fb = d.get("face_box")
@@ -819,11 +820,13 @@ class AttentionEngine:
                 if crop.size == 0 or crop.shape[0] < 20 or crop.shape[1] < 20:
                     continue
                 batch.append(crop)
-                refs.append(gv)
+                refs.append((gv, av))
             if batch:
-                for (lbl, score), gv in zip(demo.classify(batch), refs):
+                for (lbl, score, age_b, age_s), (gv, av) in zip(demo.classify(batch), refs):
                     if score >= demo.MIN_SCORE:
                         gv[lbl] = gv.get(lbl, 0.0) + score
+                    if age_b and age_s >= demo.AGE_MIN_SCORE:
+                        av[age_b] = av.get(age_b, 0.0) + age_s
             return True
         except Exception as e:
             self._demo_err = f"{type(e).__name__}: {e}"

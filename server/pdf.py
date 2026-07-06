@@ -217,6 +217,33 @@ def build_pdf(job, out_path):
             d.y -= 19
         d.y -= 8
 
+    # ---------- audience ----------
+    aud = rep.get("audience")
+    if aud and aud.get("enabled"):
+        d.need(70)
+        c.setFillGray(WHITE)
+        c.setFont(F["med"], 12)
+        c.drawString(M, d.y, "Audience insights")
+        c.setFillGray(FAINT)
+        c.setFont(F["reg"], 7)
+        c.drawString(M + 108, d.y + 0.5,
+                     f"estimates, aggregate only — coverage {aud.get('coverage_pct', 0)}%")
+        d.y -= 16
+        ts = aud.get("traffic_split", {})
+        c.setFillGray(MUTED)
+        c.setFont(F["reg"], 8.5)
+        c.drawString(M, d.y, f"Gender (traffic): {ts.get('female', 0)} female · "
+                             f"{ts.get('male', 0)} male · {ts.get('unknown', 0)} unknown")
+        d.y -= 12
+        ag = aud.get("age_split")
+        if ag:
+            parts = [f"{b}: {ag.get(b, 0)}" for b in aud.get("age_order", []) if ag.get(b, 0)]
+            if ag.get("unknown"):
+                parts.append(f"?: {ag['unknown']}")
+            c.drawString(M, d.y, "Age (est.): " + (" · ".join(parts) if parts else "insufficient data"))
+            d.y -= 12
+        d.y -= 8
+
     # ---------- AI insights ----------
     ins = job.get("insights")
     if ins and ins.get("text"):

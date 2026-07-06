@@ -849,7 +849,11 @@ function audienceHtml(rep) {
     return `<div class="wide-chart aud"><h4>Audience insights <span class="new-tag">BETA</span></h4>
       <p class="aud-note">Could not run: ${esc(a.note || "unknown")}. Faces may be too small/occluded, or the classifier failed to load.</p></div>`;
   }
-  if (!a || !a.enabled) return "";
+  if (!a) {
+    return `<div class="wide-chart aud"><h4>Audience insights</h4>
+      <p class="aud-note">Not run for this analysis — enable the "Audience insights" checkbox on the Ad zones step. First run downloads the classifier models (needs internet, a few minutes).</p></div>`;
+  }
+  if (!a.enabled) return "";
   const bar = (s) => {
     const n = (s.female || 0) + (s.male || 0) + (s.unknown || 0) || 1;
     const f = (s.female / n) * 100, m = (s.male / n) * 100, u = (s.unknown / n) * 100;
@@ -860,6 +864,22 @@ function audienceHtml(rep) {
   };
   const legend = (s) => `<small>${s.female} female · ${s.male} male · ${s.unknown} unknown</small>`;
   let rows = `<div class="aud-row"><span class="k" title="${GLOSS["Audience insights"]}">Traffic</span>${bar(a.traffic_split)}${legend(a.traffic_split)}</div>`;
+  if (a.age_split && a.age_order) {
+    const shades = ["#ffffff", "rgba(255,255,255,.8)", "rgba(255,255,255,.62)", "rgba(255,255,255,.46)", "rgba(255,255,255,.32)", "rgba(255,255,255,.2)", "rgba(255,255,255,.55)"];
+    const tot = a.age_order.reduce((s, b) => s + (a.age_split[b] || 0), 0) + (a.age_split.unknown || 0);
+    if (tot) {
+      let segs = "", leg = [];
+      a.age_order.forEach((b, i) => {
+        const v = a.age_split[b] || 0;
+        if (!v) return;
+        segs += `<div style="width:${(v / tot) * 100}%;background:${shades[i % shades.length]}" title="${b}: ${v}"></div>`;
+        leg.push(`${b}:${v}`);
+      });
+      const u = a.age_split.unknown || 0;
+      if (u) segs += `<div style="width:${(u / tot) * 100}%;background:rgba(255,255,255,.08)" title="unknown: ${u}"></div>`;
+      rows += `<div class="aud-row"><span class="k">Age (est.)</span><div class="bar-line" style="height:14px">${segs}</div><small>${leg.join(" · ")}${u ? " · ?:" + u : ""}</small></div>`;
+    }
+  }
   for (const z of rep.zones) {
     const zi = a.zones[String(z.id)];
     if (zi) rows += `<div class="aud-row"><span class="k">${esc(z.label)} lookers</span>${bar(zi.lookers_split)}${legend(zi.lookers_split)}</div>`;
