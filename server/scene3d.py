@@ -154,24 +154,102 @@ class SceneModel:
         return ray * t
 
     def zone_quad(self, rect_px):
-        """Cizilen 2D dikdortgen -> 3D dortgen (medyan derinlik) + metre boyutlari."""
-        if self.depth is None:
+        """Cizilen 2D dikdortgen -> GERCEK yuzeye oturtulmus yonlu 3D dortgen.
+
+        Bolge icindeki derinlik noktalarina duzlem oturtulur (Z = aX + bY + c,
+        aykiri ayiklamali — onunden gecen insanlar/parazit elenir); koseler kendi
+        piksel isinlariyla o duzleme yerlestirilir. Acili duvar/billboard artik
+        acili temsil edilir: normal + egim (tilt) cikar. Fit tutmazsa medyan
+        derinlikli kameraya-paralel dortgene dusulur."""
+        if self.depth is None or not self.f:
             return None
         x, y, w, h = [int(v) for v in rect_px]
         x2, y2 = min(x + w, self.W - 1), min(y + h, self.H - 1)
         x, y = max(x, 0), max(y, 0)
-        if x2 <= x or y2 <= y:
+        if x2 <= x + 2 or y2 <= y + 2:
             return None
-        Z = float(np.median(self.depth[y:y2, x:x2]))
-        if not (0.5 < Z < 300):
+
+        us = np.unique(np.linspace(x, x2, min(28, x2 - x)).astype(int))
+        vs = np.unique(np.linspace(y, y2, min(28, y2 - y)).astype(int))
+        pts = []
+        for v in vs:
+            for u in us:
+                Z = float(self.depth[v, u])
+                if 0.5 < Z < 300:
+                    pts.append([(u - self.cx) * Z / self.f,
+                                (v - self.cy) * Z / self.f, Z])
+        if len(pts) < 12:
             return None
-        c = [self.backproject(u, v, Z) for (u, v) in
-             ((x, y), (x2, y), (x2, y2), (x, y2))]
-        wm = float(np.linalg.norm(c[1] - c[0]))
-        hm = float(np.linalg.norm(c[3] - c[0]))
-        center = (c[0] + c[2]) / 2
-        return {"corners": c, "center": center, "w_m": round(wm, 2), "h_m": round(hm, 2),
-                "depth_m": round(Z, 1)}
+        P = np.array(pts)
+        Zmed = float(np.median(P[:, 2]))
+        P = P[np.abs(P[:, 2] - Zmed) < max(1.5, Zmed * 0.2)]  # kaba aykırı ayıklama
+        if len(P) < 12:
+            return None
+
+        plane = None
+        try:
+            A = np.c_[P[:, 0], P[:, 1], np.ones(len(P))]
+            coef, *_ = np.linalg.lstsq(A, P[:, 2], rcond=None)
+            res = np.abs(A @ coef - P[:, 2])
+            thr = max(0.25, 1.5 * float(np.median(res)))
+            inl = res < thr
+            if int(inl.sum()) >= 12:
+                coef, *_ = np.linalg.lstsq(A[inl], P[inl, 2], rcond=None)
+            plane = tuple(float(v) for v in coef)
+        except Exception:
+            plane = None
+
+        def corner(u, v):
+            if plane is not None:
+                a, b, c = plane
+                den = 1.0 - a * (u - self.cx) / self.f - b * (v - self.cy) / self.f
+                if den > 1e-4:
+                    Z = c / den
+                    if 0.5 < Z < 300:
+                        return self.backproject(u, v, Z)
+            return self.backproject(u, v, Zmed)
+
+        cns = [corner(x, y), corner(x2, y), corner(x2, y2), corner(x, y2)]
+        center = (cns[0] + cns[2]) / 2
+        wm = float(np.linalg.norm(cns[1] - cns[0]))
+        hm = float(np.linalg.norm(cns[3] - cns[0]))
+
+        nrm, tilt = None, None
+        if plane is not None:
+            nv = np.array([plane[0], plane[1], -1.0])
+            nv /= np.linalg.norm(nv)
+            if float(nv @ center) > 0:      # normal kameraya baksın
+                nv = -nv
+            view = center / (np.linalg.norm(center) or 1.0)
+            tilt = round(math.degrees(math.acos(max(-1.0, min(1.0, float(-nv @ view))))), 1)
+            nrm = nv
+        return {"corners": cns, "center": center, "normal": nrm, "tilt_deg": tilt,
+                "w_m": round(wm, 2), "h_m": round(hm, 2),
+                "depth_m": round(float(center[2]), 1)}
+
+    def zone_mesh(self, quad, nu=6, nv=4):
+        """Yüzeye oturan 3D tel-kafes + normal oku (görsel kanıt katmanı)."""
+        c0, c1, c2, c3 = quad["corners"]
+        lines = []
+        for i in range(nu + 1):
+            s = i / nu
+            a = self.project(c0 + (c1 - c0) * s)
+            b = self.project(c3 + (c2 - c3) * s)
+            if a and b:
+                lines.append((a, b))
+        for j in range(nv + 1):
+            s = j / nv
+            a = self.project(c0 + (c3 - c0) * s)
+            b = self.project(c1 + (c2 - c1) * s)
+            if a and b:
+                lines.append((a, b))
+        nseg = None
+        if quad.get("normal") is not None:
+            p1 = self.project(quad["center"])
+            p2 = self.project(quad["center"] + quad["normal"] * max(0.6, quad["w_m"] * 0.3))
+            if p1 and p2:
+                nseg = (p1, p2)
+        return lines, nseg
 
     def refit(self, person_samples):
         """Derinliği yeniden hesaplamadan odak+zemini TÜM örneklerle tazele (ucuz)."""
@@ -317,23 +395,49 @@ class SceneModel:
         return math.degrees(math.acos(max(-1.0, min(1.0, c))))
 
     def looks_at_3d(self, head3, dir3, quad, noise_deg, sig):
-        """3D koni testi: bakış ışını, bölgenin 3D yüzeyine dönük mü?
-        body: gerçek azimut (zemin düzleminde) — dikey ölçülemediği için serbest.
-        head: tam 3D açı (dikey dahil)."""
+        """3D bakış testi — bölge GERÇEK yüzeyine oturmuş yönlü dörtgendir.
+
+        1. Arka-taraf eleme: yüzeyin görünmez tarafındaki kişi bakamaz.
+        2. head: ışın-düzlem KESİŞİMİ — bakış ışınının düzlemi deldiği nokta,
+           dörtgenin içinde mi (gürültü marjı = mesafe * tan(noise))?
+        3. body: gerçek zemin azimutu (dikey ölçülemez), yüzey genişliğine göre.
+        Normal yoksa (fit başarısız) açısal teste düşülür."""
         to = quad["center"] - head3
         dist = float(np.linalg.norm(to))
         if dist < 0.3:
             return False
+        n = quad.get("normal")
+        if n is not None and float(n @ (head3 - quad["center"])) < 0:
+            return False   # yüzeyin arkasından görünmez
+
         if sig == "body":
             u = self.up()
             a = dir3 - float(dir3 @ u) * u
             b = to - float(to @ u) * u
             half = math.degrees(math.atan((quad["w_m"] / 2) / dist))
-        else:
-            a, b = dir3, to
-            diag = math.hypot(quad["w_m"], quad["h_m"]) / 2
-            half = math.degrees(math.atan(diag / dist))
-        return self.ang3d(a, b) <= noise_deg + min(half, 25.0)
+            return self.ang3d(a, b) <= noise_deg + min(half, 25.0)
+
+        # head: ışın-düzlem kesişimi (en doğru test)
+        if n is not None:
+            den = float(n @ dir3)
+            if abs(den) > 1e-4:
+                tt = float(n @ to) / den
+                if tt <= 0:
+                    return False           # bakış yüzeyden uzağa
+                p = head3 + dir3 * tt
+                e_u = quad["corners"][1] - quad["corners"][0]
+                e_v = quad["corners"][3] - quad["corners"][0]
+                wu = float(np.linalg.norm(e_u)) or 1e-6
+                hv = float(np.linalg.norm(e_v)) or 1e-6
+                rel = p - quad["corners"][0]
+                du = float(rel @ (e_u / wu))
+                dv = float(rel @ (e_v / hv))
+                m = dist * math.tan(math.radians(noise_deg))
+                return -m <= du <= wu + m and -m <= dv <= hv + m
+
+        diag = math.hypot(quad["w_m"], quad["h_m"]) / 2
+        half = math.degrees(math.atan(diag / dist))
+        return self.ang3d(dir3, to) <= noise_deg + min(half, 25.0)
 
     def depth_grid(self, gw=96):
         """What-if için kaba derinlik ızgarası (tarayıcıya gider, ~birkaç KB)."""
@@ -345,6 +449,33 @@ class SceneModel:
         return {"gw": gw, "gh": gh,
                 "z": [[round(float(v), 1) for v in row] for row in g]}
 
+    # ---------- güven kapısı ----------
+    def reliable(self):
+        """3D geometri kararlara girmeye layık mı? Değilse motor 2.5D'ye düşer.
+        Bu, '3D sapıtırsa geri dön' mekanizmasının ta kendisi — otomatik."""
+        return (self.enabled and self.confidence >= 40.0
+                and self.ground is not None
+                and self.cam_height is not None and 1.2 <= self.cam_height <= 40.0)
+
+    # ---------- LiDAR-tarzı sahne görünümü ----------
+    def render_view(self):
+        """Derinlik haritasını AR/LiDAR taraması gibi renklendir + ızgarayı bindir."""
+        import cv2
+        if self.depth is None:
+            return None
+        d = np.clip(self.depth, 0.5, 80.0)
+        dn = (np.log(d) - math.log(0.5)) / (math.log(80.0) - math.log(0.5))
+        img = cv2.applyColorMap((np.clip(1 - dn, 0, 1) * 255).astype(np.uint8),
+                                cv2.COLORMAP_TURBO)
+        for (a, b, major) in (self.grid_segments() or []):
+            cv2.line(img, (int(a[0]), int(a[1])), (int(b[0]), int(b[1])),
+                     (255, 255, 255), 2 if major else 1, cv2.LINE_AA)
+        tag = f"depth reconstruction · f={self.f:.0f}px · conf {self.confidence:.0f}%"
+        cv2.rectangle(img, (10, 10), (26 + 8 * len(tag), 40), (12, 12, 12), -1)
+        cv2.putText(img, tag, (18, 32), cv2.FONT_HERSHEY_SIMPLEX, 0.55,
+                    (255, 255, 255), 1, cv2.LINE_AA)
+        return img
+
     # ---------- rapor ----------
     def state(self):
         if not self.enabled:
@@ -353,6 +484,8 @@ class SceneModel:
              "model": "Depth Anything V2 metric (outdoor, small)",
              "focal_px": round(self.f, 1) if self.f else None,
              "calib_confidence": self.confidence,
+             "reliable": self.reliable(),
+             "gate": "active" if self.reliable() else "fallback-2.5d (low confidence)",
              "samples": self.samples}
         if self.height_mean is not None:
             s["person_height_m"] = {"mean": round(self.height_mean, 2),

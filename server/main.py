@@ -50,7 +50,7 @@ def get_engine():
 
 
 def _run(job_id: str, path: Path, zones: list, cost_map: dict, is_video: bool,
-         sample_fps: int, crowd_mode: str, demographics: bool):
+         sample_fps: int, crowd_mode: str, demographics: bool, face_blur: bool):
     job = jobs[job_id]
     try:
         job["status"] = "loading-model"
@@ -59,10 +59,10 @@ def _run(job_id: str, path: Path, zones: list, cost_map: dict, is_video: bool,
         if is_video:
             report = eng.process_video(path, zones, job, cost_map,
                                        sample_fps=sample_fps, crowd_mode=crowd_mode,
-                                       demographics=demographics)
+                                       demographics=demographics, face_blur=face_blur)
         else:
             report = eng.process_image(path, zones, job, cost_map, crowd_mode=crowd_mode,
-                                       demographics=demographics)
+                                       demographics=demographics, face_blur=face_blur)
         job["report"] = report
         job["progress"] = 100
         job["status"] = "done"
@@ -99,7 +99,7 @@ def _get_job(job_id: str):
     job = {"status": "done", "progress": 100, "preview": None, "live": None,
            "created": 0, "report": json.loads((d / "report.json").read_text())}
     for pat, key in (("*.annotated.mp4", "out_video"), ("*.annotated.jpg", "out_image"),
-                     ("*.sim.jpg", "sim_frame")):
+                     ("*.sim.jpg", "sim_frame"), ("*.scene.jpg", "scene_view")):
         f = next(iter(d.glob(pat)), None)
         if f:
             job[key] = str(f)
@@ -118,7 +118,8 @@ def _get_job(job_id: str):
 @app.post("/api/analyze")
 async def analyze(file: UploadFile = File(...), zones: str = Form(...),
                   costs: str = Form("{}"), sample_fps: int = Form(10),
-                  crowd_mode: str = Form("auto"), demographics: str = Form("off")):
+                  crowd_mode: str = Form("auto"), demographics: str = Form("off"),
+                  face_blur: str = Form("on")):
     zs = json.loads(zones)
     if not zs:
         raise HTTPException(400, "at least one zone required")
@@ -134,7 +135,7 @@ async def analyze(file: UploadFile = File(...), zones: str = Form(...),
                     "live": None, "report": None, "created": time.time()}
     threading.Thread(target=_run,
                      args=(job_id, path, zs, json.loads(costs), is_video, sample_fps,
-                           crowd_mode, demographics == "on"),
+                           crowd_mode, demographics == "on", face_blur != "off"),
                      daemon=True).start()
     return {"job_id": job_id}
 
@@ -237,6 +238,14 @@ async def video(job_id: str):
     if not job or not job.get("out_video"):
         raise HTTPException(404)
     return FileResponse(job["out_video"], filename="oculiq-annotated.mp4")
+
+
+@app.get("/api/jobs/{job_id}/scene")
+async def scene_view(job_id: str):
+    job = _get_job(job_id)
+    if not job or not job.get("scene_view"):
+        raise HTTPException(404)
+    return FileResponse(job["scene_view"])
 
 
 @app.get("/api/jobs/{job_id}/frame")

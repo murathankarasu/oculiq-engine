@@ -234,6 +234,7 @@ class AttentionEngine:
         self.persp_k = 0.45  # perspektif kısaltma VARSAYILANI (oto-kalibrasyon devralır)
         self._cal = None     # aktif işin KCalibrator'ı (process_* başında kurulur)
         self.auto_cone = True  # koni otomatiği: kişisel gürültü + bölge açısal genişliği
+        self._demo_err = None
 
     # ---------- orientation ----------
     # Sinyal zinciri (yakından uzağa):
@@ -444,7 +445,8 @@ class AttentionEngine:
 
     # ---------- video ----------
     def process_video(self, path, zones, job, cost_map=None, sample_fps=10,
-                      max_seconds=None, crowd_mode="auto", demographics=False):
+                      max_seconds=None, crowd_mode="auto", demographics=False,
+                      face_blur=True):
         cap = cv2.VideoCapture(str(path))
         src_fps = cap.get(cv2.CAP_PROP_FPS) or 25
         n_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
@@ -473,9 +475,25 @@ class AttentionEngine:
         sim_frame_saved = False
         gaze3d_n = 0            # kaç bakış örneği gerçek 3D testten geçti
         gaze_total = 0
+        scene_ok = False        # güven kapısı: 3D yalnızca güvenilirse kararlara girer
+        demo_note = None
+        if demographics:        # sınıflandırıcıyı BAŞTA yükle (sessiz gecikme/çökme olmasın)
+            try:
+                from server import demographics as demo
+                job["status"] = "loading-model"
+                demo._gp()
+                job["status"] = "processing"
+            except Exception as e:
+                demographics = False
+                demo_note = f"gender model unavailable: {type(e).__name__}: {e}"
+
 
         out_path = Path(path).with_suffix(".annotated.mp4")
-        writer = self._writer(out_path, W, H, 1.0 / dt)
+        out_fps = 1.0 / dt
+        writer = self._writer(out_path, W, H, out_fps)
+        written = 0             # VFR telafisi: çıktı, gerçek zamana hizalanır
+        t_first = None
+        prev_t = None
 
         fi = 0
         t0 = time.time()
@@ -484,13 +502,21 @@ class AttentionEngine:
             ok, frame = cap.read()
             if not ok:
                 break
+            # GERÇEK zaman damgası (VFR kaynaklarda nominal sayaç kayar!)
+            tm = cap.get(cv2.CAP_PROP_POS_MSEC)
+            t_real = tm / 1000.0 if tm and tm > 0 else fi / src_fps
             if fi % stride:
                 fi += 1
                 continue
-            t = fi / src_fps
+            t = t_real
             if max_seconds and t > max_seconds:
                 break
             fi += 1
+            if t_first is None:
+                t_first = t
+            # metrik birikimi gerçek kare aralığıyla (dwell saniyeleri doğru olsun)
+            dtf = dt if prev_t is None else min(max(t - prev_t, 0.01), 0.5)
+            prev_t = t
 
             dets = self._detect_frame(frame, tiled, tracker)
 
@@ -521,15 +547,25 @@ class AttentionEngine:
                     from server.scene3d import SceneModel
                     job["status"] = "scene-3d"
                     scene = SceneModel().build(sim_frame_img, foot_samples)
+                    scene_ok = scene.reliable()   # GÜVEN KAPISI: düşükse 3D devre dışı
                     if scene.enabled:
+                        view = scene.render_view()   # LiDAR-tarzı rekonstrüksiyon (tanı)
+                        if view is not None:
+                            vp = Path(path).with_suffix(".scene.jpg")
+                            cv2.imwrite(str(vp), view)
+                            job["scene_view"] = str(vp)
+                    if scene_ok:
                         scene._grid = scene.grid_segments()
                         zquads = {z["id"]: scene.zone_quad(z["rect"]) for z in zs}
+                        for q in zquads.values():   # yüzey mesh'i bir kez hesapla
+                            if q:
+                                q["_mesh"], q["_nseg"] = scene.zone_mesh(q)
                     job["status"] = "processing"
                 except Exception:
                     scene = None
 
-            # 3D bakış: kafa konumu + dünya-uzayı yön (sahne kilitliyse)
-            if scene is not None and scene.enabled:
+            # 3D bakış: kafa konumu + dünya-uzayı yön (yalnızca güven kapısı AÇIKKEN)
+            if scene_ok:
                 for d in dets:
                     if d["dx"] is None or (d["dx"] == 0 and d["dy"] == 0):
                         continue
@@ -537,6 +573,11 @@ class AttentionEngine:
                     h3 = scene.head_pos(bx + bw / 2.0, by + float(bh))
                     if h3 is None:
                         continue
+                    # sağlama: kafa 3D'si, kişinin gerçek baş pikseline geri düşmeli
+                    pr = scene.project(h3)
+                    if (pr is None or abs(pr[0] - (bx + bw / 2.0)) > bh * 1.2
+                            or abs(pr[1] - by) > bh * 1.2):
+                        continue   # geometri bu kişi için tutarsız -> 2.5D kal
                     g3 = scene.gaze_dir3d(d["dx"], d["dy"], d.get("k", self.persp_k), d["sig"])
                     if g3 is not None:
                         d["head3"], d["dir3"] = h3, g3
@@ -552,7 +593,7 @@ class AttentionEngine:
                 })
                 p["frames"] += 1
                 if p["pos"] is not None:
-                    v = math.dist(d["c"], p["pos"]) / dt / max(d["h"], 1)
+                    v = math.dist(d["c"], p["pos"]) / dtf / max(d["h"], 1)
                     p["v"].append(v)
                     d["v"] = v
                 p["pos"] = d["c"]
@@ -592,15 +633,15 @@ class AttentionEngine:
                     # temporal majority vote — "oyun mantığı": tek karelik titremeyi ele
                     look = (sum(hist) * 2 > len(hist)) if len(hist) >= 2 else raw_look
                     if look:
-                        p["dwell"][z["id"]] += dt
-                        p["sig_sec"][d["sig"]] += dt
-                        timeline[b][z["id"]] += dt
+                        p["dwell"][z["id"]] += dtf
+                        p["sig_sec"][d["sig"]] += dtf
+                        timeline[b][z["id"]] += dtf
                         if not p["looking"][z["id"]]:
                             p["episodes"][z["id"]] += 1
                             p["first_look"].setdefault(z["id"], t)
-                            p["intervals"][z["id"]].append([t, t + dt])
+                            p["intervals"][z["id"]].append([t, t + dtf])
                         else:
-                            p["intervals"][z["id"]][-1][1] = t + dt
+                            p["intervals"][z["id"]][-1][1] = t + dtf
                         if "v" in d:
                             p["v_look"].append(d["v"])
                         d["zone"] = z["id"]
@@ -610,11 +651,19 @@ class AttentionEngine:
                     p["looking"][z["id"]] = look
 
             if demographics:
-                demographics = self._gender_pass(frame, dets, persons)  # hata -> kapanır
+                ok_demo = self._gender_pass(frame, dets, persons)
+                if not ok_demo:
+                    demographics = False
+                    demo_note = self._demo_err or "classifier unavailable"
+
 
             annotated = self._draw(frame, dets, zs, heat, t, len(persons), tiled,
-                                   scene=scene, zquads=zquads)
-            writer.write(annotated)
+                                   scene=scene if scene_ok else None,
+                                   zquads=zquads, blur=face_blur)
+            want = max(written + 1, int(round((t - t_first) * out_fps)) + 1)
+            for _ in range(min(4, want - written)):
+                writer.write(annotated)
+                written += 1
 
             if fi % (stride * 3) < stride:
                 job["preview"] = self._jpeg_b64(annotated, 960)
@@ -638,7 +687,7 @@ class AttentionEngine:
                "min_dwell": self.min_dwell, "k": self.persp_k, "auto_cone": self.auto_cone,
                "persons": {str(k): round(v["first_t"], 2) for k, v in persons.items()},
                "rays": rays}
-        if scene is not None and scene.enabled and scene.up() is not None:
+        if scene_ok and scene.up() is not None:
             grid = scene.depth_grid()
             if grid:
                 sim["s3"] = {"f": round(scene.f, 1), "cx": scene.cx, "cy": scene.cy,
@@ -655,6 +704,8 @@ class AttentionEngine:
         if demographics and persons:
             from server import demographics as demo
             report["audience"] = demo.aggregate(persons, zs, self.min_dwell)
+        elif demo_note:
+            report["audience"] = {"enabled": False, "note": demo_note}
         if density:
             report["density_timeline"] = [
                 {"t": b, "avg": round(s / max(f, 1), 1)} for b, (s, f) in sorted(density.items())]
@@ -664,7 +715,7 @@ class AttentionEngine:
 
     # ---------- image ----------
     def process_image(self, path, zones, job, cost_map=None, crowd_mode="auto",
-                      demographics=False):
+                      demographics=False, face_blur=True):
         frame = cv2.imread(str(path))
         H, W = frame.shape[:2]
         tiled = self._use_tiles(W, H, crowd_mode)
@@ -702,7 +753,7 @@ class AttentionEngine:
                     self._heat_add(heat, d, z, W, H)
             persons[i] = p
 
-        annotated = self._draw(frame, dets, zs, heat, None, len(dets), tiled)
+        annotated = self._draw(frame, dets, zs, heat, None, len(dets), tiled, blur=face_blur)
         out_path = Path(path).with_suffix(".annotated.jpg")
         cv2.imwrite(str(out_path), annotated)
         job["out_image"] = str(out_path)
@@ -732,11 +783,14 @@ class AttentionEngine:
             from server.scene3d import SceneModel
             if report["scene3d"].get("enabled") and foot_samples:
                 sc = SceneModel().build(frame, foot_samples)
-                if sc.enabled:
+                if sc.enabled and sc.reliable():
                     sc._grid = sc.grid_segments()
                     zq = {z["id"]: sc.zone_quad(z["rect"]) for z in zs}
+                    for q in zq.values():
+                        if q:
+                            q["_mesh"], q["_nseg"] = sc.zone_mesh(q)
                     annotated = self._draw(frame, dets, zs, heat, None, len(dets), tiled,
-                                           scene=sc, zquads=zq)
+                                           scene=sc, zquads=zq, blur=face_blur)
                     cv2.imwrite(str(out_path), annotated)
                     job["preview"] = self._jpeg_b64(annotated, 1280)
         except Exception:
@@ -746,6 +800,7 @@ class AttentionEngine:
     # ---------- audience (opt-in, toplu) ----------
     def _gender_pass(self, frame, dets, persons):
         """Görünür-yüzlü kişilere gender oyu ekler. Hata olursa özelliği kapatır."""
+        self._demo_err = None
         try:
             from server import demographics as demo
             batch, refs = [], []
@@ -770,7 +825,8 @@ class AttentionEngine:
                     if score >= demo.MIN_SCORE:
                         gv[lbl] = gv.get(lbl, 0.0) + score
             return True
-        except Exception:
+        except Exception as e:
+            self._demo_err = f"{type(e).__name__}: {e}"
             return False
 
     # ---------- scene3d ----------
@@ -797,6 +853,8 @@ class AttentionEngine:
                     continue
                 zr["size_m"] = [q["w_m"], q["h_m"]]
                 zr["zone_depth_m"] = q["depth_m"]
+                if q.get("tilt_deg") is not None:
+                    zr["surface_tilt_deg"] = q["tilt_deg"]
                 dists = []
                 for p in persons.values():
                     if p["dwell"][z["id"]] < self.min_dwell:
@@ -940,10 +998,27 @@ class AttentionEngine:
         return {k: round(v / s * 100, 1) for k, v in tot.items()}
 
     # ---------- rendering ----------
-    def _draw(self, frame, dets, zs, heat, t, traffic, tiled=False, scene=None, zquads=None):
+    def _draw(self, frame, dets, zs, heat, t, traffic, tiled=False, scene=None,
+              zquads=None, blur=True):
         out = frame.copy()
         H, W = out.shape[:2]
         sc = max(W / 1280, 0.8)
+
+        # --- GDPR: yüzleri pikselleştir (tüm yazılı çıktılar; kaynak kare dokunulmaz) ---
+        if blur:
+            for d in dets:
+                fb = d.get("face_box")
+                if not fb:
+                    continue
+                x0 = max(0, int(fb[0])); y0 = max(0, int(fb[1]))
+                x1 = min(W, int(fb[0] + fb[2])); y1 = min(H, int(fb[1] + fb[3]))
+                if x1 - x0 < 4 or y1 - y0 < 4:
+                    continue
+                roi = out[y0:y1, x0:x1]
+                small = cv2.resize(roi, (max(2, (x1 - x0) // 10), max(2, (y1 - y0) // 10)),
+                                   interpolation=cv2.INTER_LINEAR)
+                out[y0:y1, x0:x1] = cv2.resize(small, (x1 - x0, y1 - y0),
+                                               interpolation=cv2.INTER_NEAREST)
 
         # --- AR katmanı: 3D zemin ızgarası gerçek yüzeye oturur (güven-renkli) ---
         if scene is not None and scene.enabled and getattr(scene, "_grid", None):
@@ -975,12 +1050,27 @@ class AttentionEngine:
             ov = out.copy()
             cv2.rectangle(ov, (x, y), (x + w, y + h), z["color"], -1)
             out = cv2.addWeighted(ov, 0.12, out, 0.88, 0)
+            q = (zquads or {}).get(z["id"])
+            # bölge yüzeye 3D oturmuş: tel-kafes + yüzey normali oku
+            if q and q.get("_mesh"):
+                ovm = out.copy()
+                for (a, b) in q["_mesh"]:
+                    cv2.line(ovm, (int(a[0]), int(a[1])), (int(b[0]), int(b[1])),
+                             z["color"], 1, cv2.LINE_AA)
+                out = cv2.addWeighted(ovm, 0.45, out, 0.55, 0)
+                if q.get("_nseg"):
+                    (p1, p2) = q["_nseg"]
+                    cv2.arrowedLine(out, (int(p1[0]), int(p1[1])), (int(p2[0]), int(p2[1])),
+                                    (12, 12, 12), max(3, int(2 * sc) + 2), cv2.LINE_AA, tipLength=0.3)
+                    cv2.arrowedLine(out, (int(p1[0]), int(p1[1])), (int(p2[0]), int(p2[1])),
+                                    z["color"], max(2, int(2 * sc)), cv2.LINE_AA, tipLength=0.3)
             cv2.rectangle(out, (x, y), (x + w, y + h), z["color"], max(2, int(2 * sc)))
             n_look = sum(1 for d in dets if d["zone"] == z["id"])
             label = f'{z["label"]}  |  {n_look} looking'
-            q = (zquads or {}).get(z["id"])
             if q:
                 label += f'  |  {q["w_m"]}x{q["h_m"]}m @ {q["depth_m"]}m'
+                if q.get("tilt_deg") is not None:
+                    label += f'  |  tilt {q["tilt_deg"]:.0f}°'
             (tw, th), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.55 * sc, 2)
             cv2.rectangle(out, (x, y - th - 14), (x + tw + 14, y), z["color"], -1)
             cv2.putText(out, label, (x + 7, y - 7), cv2.FONT_HERSHEY_SIMPLEX,
@@ -1001,11 +1091,13 @@ class AttentionEngine:
                 p1 = scene.project(d["head3"])
                 p2 = scene.project(d["head3"] + d["dir3"] * 2.5)
                 if p1 and p2:
-                    a1 = (int(p1[0]), int(p1[1]))
-                    a2 = (int(p2[0]), int(p2[1]))
-                    cv2.arrowedLine(out, a1, a2, (12, 12, 12), th + 4, cv2.LINE_AA, tipLength=0.28)
-                    cv2.arrowedLine(out, a1, a2, col, th + 1, cv2.LINE_AA, tipLength=0.28)
-                    drew3d = True
+                    seg = math.hypot(p2[0] - p1[0], p2[1] - p1[1])
+                    if seg <= max(h * 2.5, 140 * sc):   # patlayan projeksiyon -> 2D'ye düş
+                        a1 = (int(p1[0]), int(p1[1]))
+                        a2 = (int(p2[0]), int(p2[1]))
+                        cv2.arrowedLine(out, a1, a2, (12, 12, 12), th + 4, cv2.LINE_AA, tipLength=0.28)
+                        cv2.arrowedLine(out, a1, a2, col, th + 1, cv2.LINE_AA, tipLength=0.28)
+                        drew3d = True
             if not drew3d and d["dx"] is not None and (d["dx"] or d["dy"]):
                 ln = max(w * 1.3, 56 * sc)
                 sx0, sy0 = int(d["c"][0]), int(d["c"][1])

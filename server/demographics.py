@@ -16,7 +16,7 @@ MODELS_DIR = Path(__file__).resolve().parent.parent / "models"
 os.environ.setdefault("HF_HOME", str(MODELS_DIR / "hf"))
 
 MODEL = "dima806/fairface_gender_image_detection"
-MIN_FACE_PX = 28          # bundan kucuk yuz siniflandirilmaz (kalite kapisi)
+MIN_FACE_PX = 24          # bundan kucuk yuz siniflandirilmaz (kalite kapisi)
 MIN_SCORE = 0.65          # dusuk guvenli tahmin oy sayilmaz
 _pipe = None
 
@@ -39,7 +39,13 @@ def classify(crops_bgr):
     """BGR yüz kırpıntıları -> [(label, score)]; label: female|male."""
     import cv2
     from PIL import Image
-    imgs = [Image.fromarray(cv2.cvtColor(c, cv2.COLOR_BGR2RGB)) for c in crops_bgr]
+    imgs = []
+    for c in crops_bgr:
+        if min(c.shape[:2]) < 96:   # kucuk yuzleri buyut (ViT 224'e gider)
+            s = 128.0 / min(c.shape[:2])
+            c = cv2.resize(c, (int(c.shape[1] * s), int(c.shape[0] * s)),
+                           interpolation=cv2.INTER_CUBIC)
+        imgs.append(Image.fromarray(cv2.cvtColor(c, cv2.COLOR_BGR2RGB)))
     outs = _gp()(imgs, top_k=1)
     res = []
     for o in outs:

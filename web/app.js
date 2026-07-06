@@ -232,6 +232,7 @@ async function startAnalysis() {
   fd.append("costs", JSON.stringify(Object.fromEntries(state.zones.map((z) => [z.id, z.cost]))));
   fd.append("crowd_mode", $("crowdMode").checked ? "on" : "auto");
   fd.append("demographics", $("demoMode").checked ? "on" : "off");
+  fd.append("face_blur", $("blurMode").checked ? "on" : "off");
 
   let res;
   try {
@@ -309,7 +310,7 @@ function renderReport(rep, jobId) {
     <div>
       <span class="badge"><span class="dot-live"></span>measured · on-device</span>
       <h2>Attention report</h2>
-      <div class="sub">${esc(rep.method)} · ${esc(rep.model)} · ${esc(rep.scan_mode || "single-pass")}${rep.calibration && rep.calibration.auto ? " · auto-calibrated" : ""}${rep.scene3d && rep.scene3d.enabled ? " · 3D scene (" + fmt(rep.scene3d.calib_confidence, 0) + "% conf)" : ""}${rep.scene3d && rep.scene3d.gaze3d_pct != null ? " · 3D gaze " + fmt(rep.scene3d.gaze3d_pct, 0) + "%" : ""} · ${rep.still ? "snapshot" : fmt(rep.duration, 1) + "s footage"} · processed in ${fmt(rep.processing_seconds, 1)}s</div>
+      <div class="sub">${esc(rep.method)} · ${esc(rep.model)} · ${esc(rep.scan_mode || "single-pass")}${rep.calibration && rep.calibration.auto ? " · auto-calibrated" : ""}${rep.scene3d && rep.scene3d.enabled ? " · 3D scene (" + fmt(rep.scene3d.calib_confidence, 0) + "% conf)" : ""}${rep.scene3d && rep.scene3d.gaze3d_pct != null ? " · 3D gaze " + fmt(rep.scene3d.gaze3d_pct, 0) + "%" : ""}${rep.scene3d && rep.scene3d.enabled && !rep.scene3d.reliable ? " · 3D→2.5D fallback" : ""} · ${rep.still ? "snapshot" : fmt(rep.duration, 1) + "s footage"} · processed in ${fmt(rep.processing_seconds, 1)}s</div>
     </div>
     <div class="rep-actions">
       <button id="dlPdf" class="primary">Export PDF</button>
@@ -328,6 +329,10 @@ function renderReport(rep, jobId) {
   </div>`;
 
   html += densitySvg(rep);
+  if (rep.scene3d && rep.scene3d.enabled) {
+    html += `<div class="wide-chart"><h4>3D scene reconstruction <span class="new-tag">DEPTH</span> — ${rep.scene3d.reliable ? "active" : "low confidence · engine fell back to 2.5D"}</h4>
+      <img class="scene-view" src="/api/jobs/${jobId}/scene" onerror="this.parentElement.style.display='none'" alt="depth reconstruction" /></div>`;
+  }
   html += audienceHtml(rep);
   html += glossaryHtml();
 
@@ -455,7 +460,28 @@ const angBetween = (ax, ay, bx, by) => {
   return Math.acos(Math.max(-1, Math.min(1, (ax * bx + ay * by) / (na * nb))));
 };
 
-// Dikdörtgenin 3D karşılığı: kaba derinlik ızgarasından medyan Z -> merkez + metre boyut
+// 3x3 Gauss çözücü (düzlem LSQ normal denklemleri için)
+function solve3(M, R) {
+  const A = M.map((r, i) => [...r, R[i]]);
+  for (let i = 0; i < 3; i++) {
+    let p = i;
+    for (let r = i + 1; r < 3; r++) if (Math.abs(A[r][i]) > Math.abs(A[p][i])) p = r;
+    if (Math.abs(A[p][i]) < 1e-9) return null;
+    [A[i], A[p]] = [A[p], A[i]];
+    for (let r = 0; r < 3; r++) {
+      if (r === i) continue;
+      const f = A[r][i] / A[i][i];
+      for (let c = i; c < 4; c++) A[r][c] -= f * A[i][c];
+    }
+  }
+  return [A[0][3] / A[0][0], A[1][3] / A[1][1], A[2][3] / A[2][2]];
+}
+const dot3 = (a, b) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+const sub3 = (a, b) => [a[0] - b[0], a[1] - b[1], a[2] - b[2]];
+const len3 = (a) => Math.hypot(a[0], a[1], a[2]);
+
+// Dikdörtgenin 3D karşılığı — motorla aynı: derinlik ızgarasına DÜZLEM oturt
+// (Z = aX + bY + c), köşeleri o düzleme ışınla yerleştir -> yönlü dörtgen + normal.
 function rectQuad3d(rect, sim) {
   const s3 = sim.s3;
   if (!s3) return null;
@@ -464,21 +490,51 @@ function rectQuad3d(rect, sim) {
   const xe = Math.min(gw - 1, Math.ceil(((rect.x + rect.w) / sim.w) * gw));
   const ys = Math.max(0, Math.floor((rect.y / sim.h) * gh));
   const ye = Math.min(gh - 1, Math.ceil(((rect.y + rect.h) / sim.h) * gh));
-  const vals = [];
+  const pts = [];
   for (let gy = ys; gy <= ye; gy++)
     for (let gx = xs; gx <= xe; gx++) {
-      const v = z[gy] && z[gy][gx];
-      if (v > 0.5 && v < 300) vals.push(v);
+      const Z = z[gy] && z[gy][gx];
+      if (!(Z > 0.5 && Z < 300)) continue;
+      const u = ((gx + 0.5) / gw) * sim.w, v = ((gy + 0.5) / gh) * sim.h;
+      pts.push([((u - s3.cx) * Z) / s3.f, ((v - s3.cy) * Z) / s3.f, Z]);
     }
-  if (!vals.length) return null;
-  vals.sort((a, b) => a - b);
-  const Z = vals[Math.floor(vals.length / 2)];
-  const cxp = rect.x + rect.w / 2, cyp = rect.y + rect.h / 2;
-  return {
-    c3: [((cxp - s3.cx) * Z) / s3.f, ((cyp - s3.cy) * Z) / s3.f, Z],
-    wm: (rect.w / s3.f) * Z,
-    hm: (rect.h / s3.f) * Z,
+  if (!pts.length) return null;
+  const zsort = pts.map((p) => p[2]).sort((a, b) => a - b);
+  const Zmed = zsort[zsort.length >> 1];
+  const inl = pts.filter((p) => Math.abs(p[2] - Zmed) < Math.max(1.5, Zmed * 0.2));
+
+  let plane = null;
+  if (inl.length >= 6) {
+    let Sxx = 0, Sxy = 0, Sx = 0, Syy = 0, Sy = 0, S1 = 0, Sxz = 0, Syz = 0, Sz = 0;
+    for (const [X, Y, Z2] of inl) {
+      Sxx += X * X; Sxy += X * Y; Sx += X; Syy += Y * Y; Sy += Y; S1++;
+      Sxz += X * Z2; Syz += Y * Z2; Sz += Z2;
+    }
+    plane = solve3([[Sxx, Sxy, Sx], [Sxy, Syy, Sy], [Sx, Sy, S1]], [Sxz, Syz, Sz]);
+  }
+  const corner = (u, v) => {
+    if (plane) {
+      const [a, b, c] = plane;
+      const den = 1 - (a * (u - s3.cx)) / s3.f - (b * (v - s3.cy)) / s3.f;
+      if (den > 1e-4) {
+        const Z = c / den;
+        if (Z > 0.5 && Z < 300) return [((u - s3.cx) * Z) / s3.f, ((v - s3.cy) * Z) / s3.f, Z];
+      }
+    }
+    return [((u - s3.cx) * Zmed) / s3.f, ((v - s3.cy) * Zmed) / s3.f, Zmed];
   };
+  const c0 = corner(rect.x, rect.y), c1 = corner(rect.x + rect.w, rect.y);
+  const c2 = corner(rect.x + rect.w, rect.y + rect.h), c3c = corner(rect.x, rect.y + rect.h);
+  const cen = [(c0[0] + c2[0]) / 2, (c0[1] + c2[1]) / 2, (c0[2] + c2[2]) / 2];
+  const eu = sub3(c1, c0), ev = sub3(c3c, c0);
+  let n = null;
+  if (plane) {
+    n = [plane[0], plane[1], -1];
+    const L = len3(n);
+    n = n.map((v) => v / L);
+    if (dot3(n, cen) > 0) n = n.map((v) => -v);   // normal kameraya baksın
+  }
+  return { c3: cen, wm: len3(eu), hm: len3(ev), corners: [c0, c1, c2, c3c], eu, ev, n };
 }
 
 // Bir ışın verilen dikdörtgene bakıyor mu? Python ile birebir: 3D varsa gerçek
@@ -789,6 +845,10 @@ function donutSvg(rep) {
 
 function audienceHtml(rep) {
   const a = rep.audience;
+  if (a && a.enabled === false) {
+    return `<div class="wide-chart aud"><h4>Audience insights <span class="new-tag">BETA</span></h4>
+      <p class="aud-note">Could not run: ${esc(a.note || "unknown")}. Faces may be too small/occluded, or the classifier failed to load.</p></div>`;
+  }
   if (!a || !a.enabled) return "";
   const bar = (s) => {
     const n = (s.female || 0) + (s.male || 0) + (s.unknown || 0) || 1;
@@ -853,7 +913,7 @@ function zoneReport(z, still) {
       ${still || z.time_to_first_look == null ? "" : `<div class="mcard" title="${GLOSS["Time to first look"]}"><div class="k">Time to first look <span class="new-tag">NEW</span></div><div class="v">${fmt(z.time_to_first_look, 1)}<small>s</small></div></div>`}
       ${still ? "" : `<div class="mcard" title="${GLOSS["Glances / looker"]}"><div class="k">Glances / looker <span class="new-tag">NEW</span></div><div class="v">${fmt(z.glances_per_looker, 1)}</div></div>`}
       ${still ? "" : `<div class="mcard" title="${GLOSS["Stopping power"]}"><div class="k">Stopping power <span class="new-tag">NEW</span></div><div class="v">${fmt(z.stopping_power, 0)}<small>% slowdown</small></div></div>`}
-      ${z.size_m ? `<div class="mcard" title="${GLOSS["Zone size"]}"><div class="k">Zone size <span class="new-tag">3D</span></div><div class="v">${fmt(z.size_m[0], 1)}×${fmt(z.size_m[1], 1)}<small>m</small></div></div>` : ""}
+      ${z.size_m ? `<div class="mcard" title="${GLOSS["Zone size"]}"><div class="k">Zone size <span class="new-tag">3D</span></div><div class="v">${fmt(z.size_m[0], 1)}×${fmt(z.size_m[1], 1)}<small>m${z.surface_tilt_deg != null ? " · " + fmt(z.surface_tilt_deg, 0) + "° tilt" : ""}</small></div></div>` : ""}
       ${z.avg_view_distance_m != null ? `<div class="mcard" title="${GLOSS["View distance"]}"><div class="k">Avg view distance <span class="new-tag">3D</span></div><div class="v">${fmt(z.avg_view_distance_m, 1)}<small>m</small></div></div>` : ""}
     </div>
     ${sigMixHtml(z)}

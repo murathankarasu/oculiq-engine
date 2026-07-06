@@ -443,6 +443,7 @@ button.sm { padding: 7px 13px; font-size: 12.5px; }
 .aud-row .bar-line { display: flex; border-radius: 2px; overflow: hidden; background: rgba(255,255,255,.05); }
 .aud-row small { color: var(--faint); font-weight: 300; }
 .aud-note { margin: 12px 0 0; font-size: 11px; color: var(--faint); font-weight: 300; line-height: 1.5; }
+.scene-view { width: 100%; border-radius: 2px; display: block; margin-top: 6px; }
 
 /* ---------- AI insights ---------- */
 .ins-section { border: 1px solid var(--border); border-radius: 2px; padding: 22px 24px; margin-bottom: 14px; }
