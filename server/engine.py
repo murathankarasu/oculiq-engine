@@ -621,8 +621,9 @@ class AttentionEngine:
                     if scene.enabled:
                         hm = scene.height_mean
                         _jlog(job,
-                              f"3D calibration: {len(foot_samples)} full-body samples, "
-                              f"{getattr(scene, 'inliers', 0)} inliers"
+                              f"3D calibration: {len(foot_samples)} samples / "
+                              f"{getattr(scene, 'persons_used', 0)} people, "
+                              f"{getattr(scene, 'inliers', 0)} consistent"
                               + (f" → height {hm:.2f}m ± {scene.height_std:.2f}" if hm else "")
                               + f" → {scene.confidence:.0f}% — "
                               + ("ACTIVE (3D gaze + 3D zones)" if scene_ok
@@ -685,9 +686,11 @@ class AttentionEngine:
                 # scene3d örnekleri + kişinin ortalama ayak noktası
                 bx, by, bw, bh = d["box"]
                 foot = (bx + bw / 2.0, by + float(bh))
-                if (len(foot_samples) < 400 and d.get("fb_ok")
-                        and foot[1] < H - 4 and bh >= 40):
-                    foot_samples.append((foot[0], foot[1], float(bh)))
+                if (len(foot_samples) < 600 and d.get("fb_ok")
+                        and foot[1] < H - 4 and bh >= 40
+                        and p.get("fs_n", 0) < 15):   # kişi başına ≤15 örnek (denge)
+                    foot_samples.append((foot[0], foot[1], float(bh), d["id"]))
+                    p["fs_n"] = p.get("fs_n", 0) + 1
                 fs = p.setdefault("foot_sum", [0.0, 0.0, 0])
                 fs[0] += foot[0]; fs[1] += foot[1]; fs[2] += 1
 
@@ -859,11 +862,11 @@ class AttentionEngine:
         report["scan_mode"] = "tiled multi-scan (crowd)" if tiled else "single-pass"
         report["calibration"] = self._cal.state()
         foot_samples = [(d["box"][0] + d["box"][2] / 2.0,
-                         d["box"][1] + float(d["box"][3]), float(d["box"][3]))
+                         d["box"][1] + float(d["box"][3]), float(d["box"][3]), d["id"])
                         for d in dets if d.get("fb_ok") and d["box"][3] >= 40]
         if len(foot_samples) < 4:   # tam-boy yoksa eski davranış (foto)
             foot_samples = [(d["box"][0] + d["box"][2] / 2.0,
-                             d["box"][1] + float(d["box"][3]), float(d["box"][3]))
+                             d["box"][1] + float(d["box"][3]), float(d["box"][3]), d["id"])
                             for d in dets]
         for i, d in enumerate(dets):  # fotoda kişi ayağı = tek örnek
             persons[i]["foot_sum"] = [foot_samples[i][0], foot_samples[i][1], 1]
@@ -938,7 +941,7 @@ class AttentionEngine:
             from server.scene3d import SceneModel
             job["status"] = "scene-3d"
             if prebuilt is not None and prebuilt.enabled:
-                sm = prebuilt.refit(foot_samples)  # tüm örneklerle güveni tazele (ucuz)
+                sm = prebuilt._recalibrate(foot_samples)  # tüm örneklerle güveni tazele (ucuz)
             else:
                 sm = SceneModel().build(frame, foot_samples)
             report["scene3d"] = sm.state()

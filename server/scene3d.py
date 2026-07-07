@@ -84,77 +84,89 @@ class SceneModel:
             d = cv2.resize(d, (self.W, self.H), interpolation=cv2.INTER_LINEAR)
         self.depth = d
 
-        # --- odak tahmini + boy-tabanli oz-dogrulama ---
-        obs = []  # (h_px, Z)
-        for (fu, fv, h_px) in person_samples:
+        # --- KALIBRASYON: ayak-ZEMIN derinligi + kisi-basina medyan boy + iterasyon ---
+        # Derinlik haritasi TEK andan; kisi baska anda baska yerde olabilir. Govde
+        # derinligi okumak ARKA PLANI okur (buyuk hata kaynagiydi). Ayagin altindaki
+        # zemin ise statiktir: her an gecerli. Ayrica ayni kisi cok kez olculup
+        # MEDYANI alinir — kare gurultusu boy sacilimini sisiremez.
+        by_pid = {}
+        for s in person_samples:
+            fu, fv, h_px = s[0], s[1], s[2]
+            pid = s[3] if len(s) > 3 else len(by_pid)
             if h_px < 24:
                 continue
             u = int(np.clip(fu, 2, self.W - 3))
-            # govde ortasindaki derinlik ayaktan daha kararli
-            v = int(np.clip(fv - h_px * 0.5, 2, self.H - 3))
-            Z = float(np.median(d[max(0, v - 4):v + 5, max(0, u - 4):u + 5]))
-            if 0.5 < Z < 200:
-                obs.append((float(h_px), Z))
-        self.samples = len(obs)
-        self.inliers = 0
-        if self.samples >= 3:
-            self._fit_focal(obs)
-        else:
-            self.f = 0.9 * self.W  # tipik CCTV varsayilani
-            self.note = "insufficient people for focal self-check"
-            self.confidence = 0.0
-
-        # --- zemin duzlemi: ayak noktalarinin 3D'sine oturt ---
-        pts = []
-        for (fu, fv, h_px) in person_samples:
-            u = int(np.clip(fu, 2, self.W - 3))
             v = int(np.clip(fv, 2, self.H - 3))
-            Z = float(np.median(d[max(0, v - 3):v + 4, max(0, u - 3):u + 4]))
+            Z = float(np.median(d[max(0, v - 2):v + 3, max(0, u - 4):u + 5]))
             if 0.5 < Z < 200:
-                pts.append(self.backproject(u, v, Z))
-        if len(pts) >= 4:
-            P = np.array(pts)
-            centroid = P.mean(axis=0)
-            _, _, vh = np.linalg.svd(P - centroid)
-            n = vh[-1]
-            if n[1] > 0:      # normal yukari baksin (görüntü y asagi -> dunya y asagi)
-                n = -n
-            dplane = -float(n @ centroid)
-            self.ground = (n.astype(float), dplane)
-            self.cam_height = abs(dplane)  # kamera orijinde: |n·0 + d|
-            # egim: zemin normali ile dusey (0,-1,0) arasindaki aci
-            self.tilt_deg = round(math.degrees(
-                math.acos(max(-1, min(1, float(-n[1]))))), 1)
+                by_pid.setdefault(pid, []).append((float(h_px), Z, u, v))
+        self.samples = sum(len(v) for v in by_pid.values())
+        self.persons_used = len(by_pid)
+        self.inliers = 0
+
+        if self.samples >= 3:
+            flat = [(h, Z) for lst in by_pid.values() for (h, Z, _, _) in lst]
+            f = float(np.median([h * Z / MEAN_PERSON_M for h, Z in flat]))
         else:
+            f = 0.9 * self.W
+            self.note = "insufficient people for focal self-check"
+        self.f = f
+
+        per_heights = []
+        for _ in range(2):   # f <-> zemin duzlemi iterasyonu
+            # zemin duzlemi (ayak noktalarindan, mevcut f ile)
+            pts = [self.backproject(u, v, Z)
+                   for lst in by_pid.values() for (_, Z, u, v) in lst]
+            if len(pts) >= 4:
+                P = np.array(pts)
+                centroid = P.mean(axis=0)
+                _, _, vh = np.linalg.svd(P - centroid)
+                n = vh[-1]
+                if n[1] > 0:
+                    n = -n
+                self.ground = (n.astype(float), -float(n @ centroid))
+                self.cam_height = abs(self.ground[1])
+                self.tilt_deg = round(math.degrees(
+                    math.acos(max(-1, min(1, float(-n[1]))))), 1)
+            # kisi basina medyan boy (zemin-duzlemi derinligiyle; yoksa harita Z)
+            per = {}
+            for pid, lst in by_pid.items():
+                hs = []
+                for (h, Zmap, u, v) in lst:
+                    Zp = None
+                    if self.ground is not None:
+                        pos = self.person_pos(u, v)
+                        if pos is not None:
+                            Zp = float(pos[2])
+                    Z = Zp if Zp and 0.5 < Zp < 200 else Zmap
+                    hs.append(h * Z / self.f)
+                if hs:
+                    per[pid] = float(np.median(hs))
+            inl = {p: h for p, h in per.items() if 1.2 <= h <= 2.1}
+            use = inl if len(inl) >= 2 else per
+            self.inliers = len(inl)
+            per_heights = list(use.values())
+            if per_heights:
+                med = float(np.median(per_heights))
+                self.f *= med / MEAN_PERSON_M   # boy medyani 1.70m'ye otursun
+
+        if per_heights:
+            self.height_mean = float(np.mean(per_heights))
+            self.height_std = float(np.std(per_heights))
+            # DOGAL boy sacilimi ~0.10m — onu cezalandirma; yalnizca FAZLASINI olc
+            excess = max(0.0, self.height_std - 0.10)
+            spread_conf = max(0.0, min(1.0, 1.0 - excess / 0.18))
+            ratio = (len(inl) / max(len(per), 1)) if per_heights else 0.0
+            ratio_pen = min(1.0, ratio / 0.5)
+            few_pen = 1.0 if self.persons_used >= 3 else 0.5
+            self.confidence = round(spread_conf * ratio_pen * few_pen * 100, 1)
+        else:
+            self.confidence = 0.0
+            self.note = (self.note + "; " if self.note else "") + "no usable height samples"
+        if self.ground is None:
             self.note = (self.note + "; " if self.note else "") + "ground plane: too few foot points"
 
         self.enabled = True
-
-    def _fit_focal(self, obs):
-        """Iki gecisli saglam odak kestirimi — CCTV gercekligi icin.
-        1. gecis: medyan f; boylar hesaplanir, [1.15m, 2.25m] disi AYKIRI sayilir
-        (kesik govde, cocuk arabasi, yanlis derinlik...). 2. gecis: yalnizca
-        inlier'larla f yeniden; guven, inlier boy sacilimindan (0.25m olcek) +
-        inlier orani cezasiyla."""
-        f0 = float(np.median([h * Z / MEAN_PERSON_M for h, Z in obs]))
-        heights0 = [(h * Z / f0, h, Z) for h, Z in obs]
-        inl = [(h, Z) for (ht, h, Z) in heights0 if 1.15 <= ht <= 2.25]
-        self.inliers = len(inl)
-        if len(inl) >= 3:
-            self.f = float(np.median([h * Z / MEAN_PERSON_M for h, Z in inl]))
-            heights = [h * Z / self.f for h, Z in inl]
-            self.height_mean = float(np.mean(heights))
-            self.height_std = float(np.std(heights))
-            spread_conf = max(0.0, min(1.0, 1.0 - self.height_std / 0.25))
-            ratio = len(inl) / max(len(obs), 1)
-            ratio_pen = min(1.0, ratio / 0.5)   # inlier orani <%50 ise cezalandir
-            self.confidence = round(spread_conf * ratio_pen * 100, 1)
-        else:
-            self.f = f0
-            self.height_mean = float(np.mean([ht for ht, _, _ in heights0]))
-            self.height_std = float(np.std([ht for ht, _, _ in heights0]))
-            self.confidence = 0.0
-            self.note = "height self-check found no consistent full-body samples"
 
     # ---------- geometri ----------
     def backproject(self, u, v, Z):
@@ -280,22 +292,58 @@ class SceneModel:
         return lines, nseg
 
     def refit(self, person_samples):
-        """Derinliği yeniden hesaplamadan odak+zemini TÜM örneklerle tazele (ucuz)."""
+        """Derinligi yeniden hesaplamadan kalibrasyonu TUM orneklerle tazele."""
         if self.depth is None:
             return self
+        return self._recalibrate(person_samples)
+
+    def _recalibrate(self, person_samples):
         d = self.depth
-        obs = []
-        for (fu, fv, h_px) in person_samples:
+        by_pid = {}
+        for s in person_samples:
+            fu, fv, h_px = s[0], s[1], s[2]
+            pid = s[3] if len(s) > 3 else len(by_pid)
             if h_px < 24:
                 continue
             u = int(np.clip(fu, 2, self.W - 3))
-            v = int(np.clip(fv - h_px * 0.5, 2, self.H - 3))
-            Z = float(np.median(d[max(0, v - 4):v + 5, max(0, u - 4):u + 5]))
+            v = int(np.clip(fv, 2, self.H - 3))
+            Z = float(np.median(d[max(0, v - 2):v + 3, max(0, u - 4):u + 5]))
             if 0.5 < Z < 200:
-                obs.append((float(h_px), Z))
-        if len(obs) >= 3:
-            self.samples = len(obs)
-            self._fit_focal(obs)
+                by_pid.setdefault(pid, []).append((float(h_px), Z, u, v))
+        if not by_pid:
+            return self
+        self.samples = sum(len(v) for v in by_pid.values())
+        self.persons_used = len(by_pid)
+        per_heights = []
+        for _ in range(2):
+            per = {}
+            for pid, lst in by_pid.items():
+                hs = []
+                for (h, Zmap, u, v) in lst:
+                    Zp = None
+                    if self.ground is not None:
+                        pos = self.person_pos(u, v)
+                        if pos is not None:
+                            Zp = float(pos[2])
+                    Z = Zp if Zp and 0.5 < Zp < 200 else Zmap
+                    hs.append(h * Z / self.f)
+                if hs:
+                    per[pid] = float(np.median(hs))
+            inl = {p: h for p, h in per.items() if 1.2 <= h <= 2.1}
+            use = inl if len(inl) >= 2 else per
+            self.inliers = len(inl)
+            per_heights = list(use.values())
+            if per_heights:
+                self.f *= float(np.median(per_heights)) / MEAN_PERSON_M
+        if per_heights:
+            self.height_mean = float(np.mean(per_heights))
+            self.height_std = float(np.std(per_heights))
+            excess = max(0.0, self.height_std - 0.10)
+            spread_conf = max(0.0, min(1.0, 1.0 - excess / 0.18))
+            ratio = (self.inliers / max(len(per_heights), 1))
+            ratio_pen = min(1.0, ratio / 0.5)
+            few_pen = 1.0 if self.persons_used >= 3 else 0.5
+            self.confidence = round(spread_conf * ratio_pen * few_pen * 100, 1)
         return self
 
     # ---------- görselleştirme (AR-tarzı) ----------
