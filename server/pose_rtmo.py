@@ -18,7 +18,7 @@ RTMO_URL = ("https://download.openmmlab.com/mmpose/v1/projects/rtmo/onnx_sdk/"
 
 
 class RtmoDetector:
-    def __init__(self, kpt_thr=0.3, person_thr=0.45):
+    def __init__(self, kpt_thr=0.3, person_thr=0.5):
         from rtmlib import RTMO
         self.kpt_thr = kpt_thr
         self.person_thr = person_thr
@@ -40,11 +40,15 @@ class RtmoDetector:
             vis = kp[kc >= self.kpt_thr]
             if len(vis) < 4:
                 continue
+            if int((kc >= self.kpt_thr).sum()) < 6:
+                continue   # çok az güvenilir eklem -> gürültü pozu
             x1, y1 = vis.min(axis=0)
             x2, y2 = vis.max(axis=0)
             w, h = float(x2 - x1), float(y2 - y1)
             if w < 6 or h < 12:
                 continue
+            if w > 1.6 * h:
+                continue   # insandan geniş kutu = dağılmış/karışmış keypoint seti
             pad = 0.12 * h   # kafa ustu / ayak alti payi (kutu tam govdeye yaklassin)
             raws.append({"box": (float(x1 - 0.08 * w), float(y1 - pad),
                                  w * 1.16, h + 2 * pad),

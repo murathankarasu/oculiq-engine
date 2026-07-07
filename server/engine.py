@@ -318,7 +318,7 @@ class AttentionEngine:
         ('sahnenin içine bakıyor'), yana bakış uzun — göğü gösteren dev ok biter."""
         return ax, ay * k, conf, sig
 
-    def looks_at(self, det, z):
+    def looks_at(self, det, z, tight=False):
         """Koni testi — OTOMATİK koni:
         koni(kişi, bölge) = kişisel sinyal gürültüsü (boyuta göre, det['cone'])
                           + bölgenin o kişiden görünen AÇISAL YARI GENİŞLİĞİ.
@@ -344,6 +344,8 @@ class AttentionEngine:
         else:
             cone = self.cone_deg * (0.7 if det["sig"] == "body" else 1.0)
 
+        if tight:
+            cone *= 0.5   # z doğrulanamıyor: görüntü-düzlemi testine yarım tolerans
         ang = math.degrees(_ang_between((ddx, ddy), (vx, vy)))
         return ang <= cone
 
@@ -663,7 +665,8 @@ class AttentionEngine:
                     pr = scene.project(h3)
                     if (pr is None or abs(pr[0] - (bx + bw / 2.0)) > bh * 1.2
                             or abs(pr[1] - by) > bh * 1.2):
-                        continue   # geometri bu kişi için tutarsız -> 2.5D kal
+                        d["z_bad"] = True   # 3D konum doğrulanamadı: derinlik bilinmiyor
+                        continue
                     g3 = scene.gaze_dir3d(d["dx"], d["dy"], d.get("k", self.persp_k), d["sig"])
                     if g3 is not None:
                         d["head3"], d["dir3"] = h3, g3
@@ -715,7 +718,8 @@ class AttentionEngine:
                         gaze3d_n += 1
                     else:                    # sahne yokken 2.5D azimut testi
                         raw_look = (d["sig"] in ("head", "body")
-                                    and self.looks_at(d, z))
+                                    and self.looks_at(d, z,
+                                                      tight=d.get("z_bad", False)))
                     gaze_total += 1
                     p["hist"][z["id"]].append(raw_look)
                     hist = p["hist"][z["id"]]
@@ -1220,14 +1224,14 @@ class AttentionEngine:
                 p2 = scene.project(d["head3"] + d["dir3"] * 2.5)
                 if p1 and p2:
                     seg = math.hypot(p2[0] - p1[0], p2[1] - p1[1])
-                    if seg <= max(h * 2.5, 140 * sc):   # patlayan projeksiyon -> 2D'ye düş
+                    if seg <= max(h * 1.8, 120 * sc):   # patlayan projeksiyon -> 2D'ye düş
                         a1 = (int(p1[0]), int(p1[1]))
                         a2 = (int(p2[0]), int(p2[1]))
                         cv2.arrowedLine(out, a1, a2, (12, 12, 12), th + 4, cv2.LINE_AA, tipLength=0.28)
                         cv2.arrowedLine(out, a1, a2, col, th + 1, cv2.LINE_AA, tipLength=0.28)
                         drew3d = True
             if not drew3d and d["dx"] is not None and (d["dx"] or d["dy"]):
-                ln = max(w * 1.3, 56 * sc)
+                ln = min(max(h * 0.9, 46 * sc), 150 * sc)  # boy-temelli + tavan
                 sx0, sy0 = int(d["c"][0]), int(d["c"][1])
                 ex, ey = int(d["c"][0] + d["dx"] * ln), int(d["c"][1] + d["dy"] * ln)
                 # koyu kontur + renkli gövde: her zeminde okunur ok
