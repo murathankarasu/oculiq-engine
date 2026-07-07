@@ -370,10 +370,11 @@ class AttentionEngine:
                          "conf": float(cf), "kp": kp, "kc": kc})
         return raws
 
-    def _detect_tiled(self, frame):
-        """Full-frame pass + adaptive overlapping tile grid, merged with IoS-NMS."""
+    def _detect_tiled(self, frame, skip_full=False):
+        """Full-frame pass + adaptive overlapping tile grid, merged with IoS-NMS.
+        skip_full: RTMO hibritinde tam kareyi RTMO taradığı için atlanır."""
         H, W = frame.shape[:2]
-        raws = self._raw_from_res(
+        raws = [] if skip_full else self._raw_from_res(
             self.model(frame, verbose=False, device=self.device, imgsz=self.imgsz,
                        conf=self.det_conf, classes=[0])[0])
 
@@ -389,7 +390,8 @@ class AttentionEngine:
                 y2 = min(H, int((r + 1) * th + my))
                 tile = frame[y1:y2, x1:x2]
                 res = self.model(tile, verbose=False, device=self.device,
-                                 imgsz=self.tile_imgsz, conf=self.det_conf, classes=[0])[0]
+                                 imgsz=self.tile_imgsz,
+                                 conf=max(0.2, self.det_conf - 0.05), classes=[0])[0]
                 raws += self._raw_from_res(res, ox=x1, oy=y1)
 
         # NMS merge: keep highest-conf, drop overlaps (same person from 2+ tiles).
@@ -443,17 +445,23 @@ class AttentionEngine:
 
     def _detect_frame(self, frame, tiled, tracker):
         if tiled:
+            # HİBRİT kalabalık taraması: RTMO tam kare (yakın/orta bant, kaliteli
+            # keypoint) + YOLO parçaları (uzak/küçük insanlar — RTMO 640'ta göremez).
+            # Uzak meydan kameralarında tek başına RTMO SIFIR tespit veriyordu.
+            rtmo_raws = []
             if self.use_rtmo and not self._rtmo_failed:
                 try:
                     if self._rtmo is None:
                         from server.pose_rtmo import RtmoDetector
                         self._rtmo = RtmoDetector()
-                    raws = self._rtmo.detect(frame)
-                    ids = tracker.update(raws)
-                    return [self._build_det(r, i) for r, i in zip(raws, ids)]
+                    rtmo_raws = self._rtmo.detect(frame)
                 except Exception:
                     self._rtmo_failed = True   # sessizce parçalı YOLO'ya dön
-            raws = self._detect_tiled(frame)
+            tile_raws = self._detect_tiled(frame, skip_full=bool(rtmo_raws))
+            raws = list(rtmo_raws)             # RTMO öncelikli (daha iyi keypoint)
+            for r in tile_raws:
+                if all(_ios(r["box"], k["box"]) < self.merge_iou for k in raws):
+                    raws.append(r)
             ids = tracker.update(raws)
         else:
             res = self.model.track(frame, persist=True, verbose=False, device=self.device,
@@ -496,7 +504,7 @@ class AttentionEngine:
                     from server.pose_rtmo import RtmoDetector
                     _jlog(job, "Loading RTMO crowd-pose engine (one-stage, Apache-2.0)…")
                     self._rtmo = RtmoDetector()
-                _jlog(job, "Crowd engine: RTMO one-stage — single pass replaces 7-pass tiling", "ok")
+                _jlog(job, "Crowd engine: HYBRID — RTMO (near field) + YOLO tiles (far/small people)", "ok")
             except Exception as e:
                 self._rtmo_failed = True
                 _jlog(job, f"RTMO unavailable ({e}) — falling back to tiled YOLO", "warn")
