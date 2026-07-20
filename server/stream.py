@@ -29,6 +29,25 @@ CAMS = DATA / "cameras.json"
 _infer_lock = threading.Lock()   # tek model, çok worker: sıralı çıkarım
 
 
+def resolve_source(url):
+    """YouTube canlı yayın URL'lerini oynatılabilir HLS'e çevir (yt-dlp).
+    Çözümlenen URL saatlik dolar — worker her (yeniden) bağlanışta çağırır.
+    İç test aracı: içerik kaydedilmez, kare işlenir ve atılır (Spec §9)."""
+    u = str(url)
+    if "youtube.com" in u or "youtu.be" in u:
+        try:
+            import yt_dlp
+            opts = {"quiet": True, "no_warnings": True,
+                    "format": "best[height<=1080]",
+                    "extractor_args": {"youtube": {"player_client": ["android"]}}}
+            with yt_dlp.YoutubeDL(opts) as y:
+                info = y.extract_info(u, download=False)
+                return info.get("url") or u
+        except Exception:
+            return u
+    return u
+
+
 # ---------------- storage ----------------
 def _db():
     DATA.mkdir(exist_ok=True)
@@ -101,7 +120,7 @@ class StreamWorker(threading.Thread):
         url = self.cam["url"]
         if isinstance(url, str) and url.isdigit():
             return cv2.VideoCapture(int(url))
-        return cv2.VideoCapture(url)
+        return cv2.VideoCapture(resolve_source(url))
 
     def stop(self):
         self.stop_flag.set()

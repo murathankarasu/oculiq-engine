@@ -395,7 +395,8 @@ async def camera_frame(cam_id: str):
         if not cam:
             raise HTTPException(404)
         url = cam["url"]
-        cap = cv2.VideoCapture(int(url) if str(url).isdigit() else url)
+        cap = cv2.VideoCapture(int(url) if str(url).isdigit()
+                               else stream.resolve_source(url))
         ok, frame = cap.read()
         cap.release()
         if not ok:
