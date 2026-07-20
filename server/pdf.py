@@ -155,6 +155,10 @@ def build_pdf(job, out_path):
             ("Peak concurrency", f"{rep['peak_concurrency']}")]
     if rep.get("avg_concurrency") is not None:
         kpis.append(("Avg crowd density", f"{rep['avg_concurrency']}"))
+    if rep.get("capture_rate") is not None:
+        kpis.append(("Capture rate", f"{rep['capture_rate']}%"))
+    if rep.get("staff_excluded"):
+        kpis.append(("Staff excluded", f"{rep['staff_excluded']}"))
     kpis.append(("Zones analyzed", f"{len(rep['zones'])}"))
     kw = (CW - (len(kpis) - 1) * 8) / len(kpis)
     for i, (k, v) in enumerate(kpis):
@@ -180,6 +184,33 @@ def build_pdf(job, out_path):
         c.setFont(F["reg"], 7)
         c.drawString(M, d.y, "Annotated frame — zones, orientation arrows, attention heatmap (turbo)")
         d.y -= 20
+
+    # ---------- entrance lines ----------
+    lines = rep.get("lines") or []
+    if lines:
+        d.need(74)
+        c.setFillGray(WHITE)
+        c.setFont(F["med"], 12)
+        c.drawString(M, d.y, "Entrance counting")
+        c.setFillGray(FAINT)
+        c.setFont(F["reg"], 7)
+        c.drawString(M + c.stringWidth("Entrance counting", F["med"], 12) + 8, d.y + 0.5,
+                     "line crossings by tracked foot position — Spec v1.0 §5")
+        d.y -= 14
+        lw = (CW - (len(lines) - 1) * 8) / len(lines)
+        for i, ln in enumerate(lines):
+            x = M + i * (lw + 8)
+            d.hairline_box(x, d.y - 48, lw, 48)
+            d.label(x + 10, d.y - 14, ln["label"][:30])
+            c.setFillGray(WHITE)
+            c.setFont(F["light"], 15)
+            c.drawString(x + 10, d.y - 33, f"{ln['enters']} in · {ln['exits']} out")
+            ci_ = ln.get("capture_rate_ci")
+            c.setFillGray(MUTED)
+            c.setFont(F["reg"], 7)
+            c.drawString(x + 10, d.y - 43, f"capture rate {ln['capture_rate']}%"
+                         + (f"  (CI {ci_[0]}–{ci_[1]}%)" if ci_ else ""))
+        d.y -= 62
 
     # ---------- zones ----------
     for z in rep["zones"]:
@@ -216,6 +247,37 @@ def build_pdf(job, out_path):
             c.drawRightString(M + CW, d.y - 3, f"{z[key]}{'' if rep['still'] else 's'}")
             d.y -= 19
         d.y -= 8
+
+    # ---------- commercial translation ----------
+    priced = [z for z in rep["zones"] if z.get("attention_cpm") is not None]
+    if priced:
+        d.need(50 + 15 * len(priced))
+        c.setFillGray(WHITE)
+        c.setFont(F["med"], 12)
+        c.drawString(M, d.y, "Commercial translation")
+        c.setFillGray(FAINT)
+        c.setFont(F["reg"], 7)
+        c.drawString(M + c.stringWidth("Commercial translation", F["med"], 12) + 8, d.y + 0.5,
+                     "what a dollar buys, in actually-watched seconds")
+        d.y -= 16
+        for z in priced:
+            c.setFillGray(MUTED)
+            c.setFont(F["reg"], 8)
+            c.drawString(M, d.y - 3, z["label"][:24])
+            c.setFillGray(WHITE)
+            c.setFont(F["med"], 8.5)
+            c.drawRightString(M + CW, d.y - 3,
+                              f"${z['cost']}/day  →  {z['attentive_seconds']}s attention  →  "
+                              f"${z['attention_cpm']} per 1k attentive sec")
+            d.y -= 15
+        if len(priced) > 1:
+            bestv = min(priced, key=lambda z: z["attention_cpm"])
+            c.setFillGray(FAINT)
+            c.setFont(F["reg"], 7)
+            c.drawString(M, d.y - 2, f"Best attention value: {bestv['label']} — a lower attention-CPM "
+                                     "buys more watched seconds per dollar at the same rate card.")
+            d.y -= 14
+        d.y -= 6
 
     # ---------- audience ----------
     aud = rep.get("audience")
@@ -258,13 +320,46 @@ def build_pdf(job, out_path):
         _insights_text(d, ins["text"])
         d.y -= 8
 
-    # ---------- honesty note ----------
-    d.need(40)
+    # ---------- methodology & trust (audit page) ----------
+    d._new_page()
+    c.setFillGray(WHITE)
+    c.setFont(F["light"], 22)
+    c.drawString(M, d.y - 8, "Methodology & trust")
     c.setFillGray(FAINT)
-    c.setFont(F["reg"], 7)
-    c.drawString(M, d.y, "Orientation-based attention: head-pose primary, body-orientation fallback; every measurement carries")
-    d.y -= 10
-    c.drawString(M, d.y, "a confidence score and rates ship with Wilson 95% CIs. Attention CPM = cost / (attentive seconds / 1000).")
+    c.setFont(F["reg"], 7.5)
+    c.drawString(M, d.y - 22, f"Measured under Oculiq Measurement Spec v{rep.get('spec', '1.0')} — docs/SPEC.md")
+    d.y -= 44
+
+    acc_lines = []
+    accp = Path(__file__).resolve().parent.parent / "docs" / "ACCURACY.md"
+    if accp.exists():
+        for raw in accp.read_text().splitlines():
+            if raw.startswith("|") and "---" not in raw and "| Metric |" not in raw:
+                cols_ = [s.strip() for s in raw.strip("|").split("|")]
+                if len(cols_) == 2:
+                    acc_lines.append(f"- {cols_[0]}: {cols_[1]}")
+    _insights_text(d, "\n".join([
+        "**What we measure — and what we don't**",
+        "- Attention = head orientation (facial keypoints, shoulder fallback) intersecting the "
+        "declared surface within a 35° base cone. This is NOT eye-tracking and is never sold as such.",
+        "- An impression requires ≥0.4s cumulative dwell; looks are smoothed by a 3-sample temporal "
+        "majority vote; a person must be seen in ≥3 sampled frames — no phantom counts.",
+        "- Every rate ships with a Wilson 95% confidence interval and a per-zone head/body signal mix.",
+        "- Entrance counting: tracked foot-point line crossing with hysteresis (Spec §5). "
+        "Reach: a wrist keypoint inside a shelf surface in ≥3 consecutive samples (Spec §2).",
+        "- Below-threshold signals are withheld, not extrapolated; simulated (what-if) figures are "
+        "never mixed with measured ones.",
+        "",
+        "**Published error margins**",
+        *(acc_lines or ["- Ground-truth accuracy study in progress — error margins will be published "
+                        "in docs/ACCURACY.md and travel with every audit report."]),
+        "",
+        "**Privacy (GDPR / KVKK)**",
+        "- 100% on-device processing — footage never leaves the machine. No facial recognition, "
+        "no identification, no re-identification across sessions.",
+        "- Faces are auto-blurred in all rendered output; audience estimates (if enabled) are "
+        "aggregate-only with k-anonymity.",
+    ]))
 
     d.finish()
 
@@ -310,7 +405,8 @@ def _insights_text(d, text):
 
 def _zone_block(d, z, still):
     c = d.c
-    block_h = 150 if still else 232
+    has_reach = not still and z.get("reaches") is not None
+    block_h = 150 if still else (290 if has_reach else 232)
     d.need(block_h)
     r, g, b = _hex(z["color"])
 
@@ -343,6 +439,8 @@ def _zone_block(d, z, still):
     stages = [("Traffic", z["traffic"]), ("Impressions", z["impressions"])]
     if not still:
         stages += [("Engaged ≥1s", z["engaged"]), ("Deep ≥3s", z["deep"])]
+        if z.get("reaches") is not None:
+            stages.append(("Reached", z.get("reachers", 0)))
     base = max(1, z["traffic"])
     for i, (lbl, v) in enumerate(stages):
         c.setFillGray(MUTED)
@@ -373,6 +471,9 @@ def _zone_block(d, z, still):
             ("Glances per looker", f"{z['glances_per_looker']}", False),
             ("Stopping power", f"{z['stopping_power']}% slowdown", False),
         ]
+        if z.get("reaches") is not None:
+            cells.append(("Reaches / rate",
+                          f"{z['reaches']} · {z['reach_rate']}% of lookers", False))
     cols = 3
     cw_ = (CW - (cols - 1) * 8) / cols
     rows = -(-len(cells) // cols)

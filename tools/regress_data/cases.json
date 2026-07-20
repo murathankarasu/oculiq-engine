@@ -1,0 +1,24 @@
+[
+  {
+    "name": "shoestore-shelf-entrance",
+    "clip": "shoestore.mp4",
+    "zones": [
+      {"id": 0, "label": "Right shelf", "type": "shelf",
+       "x": 0.58, "y": 0.33, "w": 0.22, "h": 0.24,
+       "poly": [[0.58, 0.33], [0.80, 0.33], [0.80, 0.57], [0.58, 0.57]]},
+      {"id": 1, "label": "Entrance", "type": "line",
+       "x": 0.05, "y": 0.80, "w": 0.85, "h": 0.01,
+       "line": [[0.90, 0.80], [0.05, 0.80]]}
+    ],
+    "sample_fps": 10,
+    "expect": {
+      "traffic": [7, 11],
+      "zones.0.impressions": [2, 6],
+      "zones.0.attention_rate": [25, 65],
+      "zones.0.reaches": [2, 8],
+      "zones.0.reachers": [2, 5],
+      "lines.0.enters": [1, 2],
+      "lines.0.exits": [0, 1]
+    }
+  }
+]

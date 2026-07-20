@@ -129,10 +129,17 @@ function initStage(W, H) {
 /* ---------- zone drawing: reklamın 4 KÖŞESİNE tıkla (serbest dörtgen) ----------
    Açılı çekilen billboard ekranda yamuktur; eksen-hizalı dikdörtgen fazla/eksik
    alan kapsar. 4 köşe = gerçek yüzey; 3D yerleşim de gerçek köşeleri kullanır. */
-let placing = false, corners = [], hoverPt = null, pending = null;
+let placing = false, placingLine = false, corners = [], hoverPt = null, pending = null;
 
 $("zoneBtn").onclick = () => {
-  placing = true; corners = []; hoverPt = null;
+  placing = true; placingLine = false; corners = []; hoverPt = null;
+  $("drawHint").textContent = "click the 4 corners of the ad surface";
+  draw.style.pointerEvents = "auto"; draw.style.cursor = "crosshair";
+  renderZones();
+};
+$("lineBtn").onclick = () => {
+  placing = true; placingLine = true; corners = []; hoverPt = null;
+  $("drawHint").textContent = "click 2 points across the entrance — the arrow shows IN (draw in reverse to flip)";
   draw.style.pointerEvents = "auto"; draw.style.cursor = "crosshair";
   renderZones();
 };
@@ -147,7 +154,32 @@ draw.addEventListener("pointerdown", (e) => {
   if (!placing) return;
   corners.push(normPt(e));
   renderZones();
-  if (corners.length === 4) {
+  if (placingLine && corners.length === 2) {
+    placing = false; placingLine = false; hoverPt = null;
+    draw.style.pointerEvents = "none"; draw.style.cursor = "default";
+    const [p1, p2] = corners;
+    if (Math.hypot(p2.x - p1.x, p2.y - p1.y) < 0.02) { corners = []; renderZones(); return; }
+    // kenar uyarısı: çizgi kadraj kenarına yapışıksa geçiş onaylanamaz (Spec §5 histerezis)
+    const E = 0.08, hint = $("drawHint");
+    const hug = (f) => f(p1) && f(p2);
+    if (hug((p) => p.y > 1 - E) || hug((p) => p.y < E) || hug((p) => p.x < E) || hug((p) => p.x > 1 - E)) {
+      hint.textContent = "⚠ line hugs the frame edge — crossings can't be confirmed there; draw it further inside, across the walking path";
+      hint.style.color = "#e0a43c";
+    } else {
+      hint.textContent = "click the 4 corners of the ad surface";
+      hint.style.color = "";
+    }
+    const x = Math.min(p1.x, p2.x), y = Math.min(p1.y, p2.y);
+    pending = { line: [[p1.x, p1.y], [p2.x, p2.y]], x, y,
+                w: Math.abs(p2.x - p1.x) || 0.01, h: Math.abs(p2.y - p1.y) || 0.01 };
+    corners = [];
+    openPop(x, y, pending.w, pending.h);
+    $("zpLabel").value = `Entrance ${state.zones.filter((z) => z.type === "line").length + 1}`;
+    $("zpType").value = "billboard"; $("zpType").disabled = true;   // tip: line (kayıtta zorlanır)
+    $("zpCost").style.display = "none";
+    return;
+  }
+  if (!placingLine && corners.length === 4) {
     placing = false; hoverPt = null;
     draw.style.pointerEvents = "none"; draw.style.cursor = "default";
     // açıya göre sırala (basit/kesişmesiz çokgen garantisi)
@@ -177,19 +209,25 @@ function openPop(x, y, w) {
 }
 $("zpSave").onclick = () => {
   if (!pending) return;
+  const isLine = !!pending.line;
   state.zones.push({
     id: state.nextId++, ...pending,
     label: $("zpLabel").value.trim() || `Zone ${state.zones.length + 1}`,
-    type: $("zpType").value,
-    cost: parseFloat($("zpCost").value) || 0,
+    type: isLine ? "line" : $("zpType").value,
+    cost: isLine ? 0 : parseFloat($("zpCost").value) || 0,
     color: COLORS[state.zones.length % COLORS.length],
   });
   pending = null;
   $("zonePop").classList.add("hidden");
+  $("zpType").disabled = false; $("zpCost").style.display = "";
   renderZones(); renderZoneList();
   $("toAnalyze").disabled = false;
 };
-$("zpCancel").onclick = () => { pending = null; $("zonePop").classList.add("hidden"); renderZones(); };
+$("zpCancel").onclick = () => {
+  pending = null; $("zonePop").classList.add("hidden");
+  $("zpType").disabled = false; $("zpCost").style.display = "";
+  renderZones();
+};
 $("zpLabel").addEventListener("keydown", (e) => { if (e.key === "Enter") $("zpSave").click(); });
 
 function polyPath(ctx2, poly, W, H) {
@@ -203,11 +241,32 @@ function renderZones() {
   dctx.clearRect(0, 0, W, H);
   for (const z of state.zones) {
     dctx.strokeStyle = z.color; dctx.lineWidth = Math.max(2, W / 480);
+    dctx.font = `600 ${Math.max(13, W / 70)}px sans-serif`;
+    if (z.line) {
+      // giriş çizgisi + IN oku (p1→p2'nin sol normali)
+      const [[x1, y1], [x2, y2]] = z.line;
+      dctx.lineWidth = Math.max(3, W / 320);
+      dctx.beginPath(); dctx.moveTo(x1 * W, y1 * H); dctx.lineTo(x2 * W, y2 * H); dctx.stroke();
+      const mx = (x1 + x2) / 2 * W, my = (y1 + y2) / 2 * H;
+      const dx = x2 * W - x1 * W, dy = y2 * H - y1 * H;
+      const ll = Math.hypot(dx, dy) || 1;
+      const nx = -dy / ll, ny = dx / ll, al = Math.max(26, ll * 0.18);
+      dctx.beginPath(); dctx.moveTo(mx, my); dctx.lineTo(mx + nx * al, my + ny * al); dctx.stroke();
+      const a = Math.atan2(ny, nx);
+      dctx.beginPath();
+      dctx.moveTo(mx + nx * al, my + ny * al);
+      dctx.lineTo(mx + nx * al - 9 * Math.cos(a - 0.45), my + ny * al - 9 * Math.sin(a - 0.45));
+      dctx.lineTo(mx + nx * al - 9 * Math.cos(a + 0.45), my + ny * al - 9 * Math.sin(a + 0.45));
+      dctx.closePath(); dctx.fillStyle = z.color; dctx.fill();
+      dctx.fillText(`${z.label} (in →)`, mx + 8, my - 8);
+      continue;
+    }
+    if (z.type === "staff") dctx.setLineDash([8, 6]);
     if (z.poly) { polyPath(dctx, z.poly, W, H); dctx.stroke(); }
     else dctx.strokeRect(z.x * W, z.y * H, z.w * W, z.h * H);
+    dctx.setLineDash([]);
     dctx.fillStyle = z.color;
-    dctx.font = `600 ${Math.max(13, W / 70)}px sans-serif`;
-    dctx.fillText(z.label, z.x * W + 6, z.y * H - 7);
+    dctx.fillText(z.type === "staff" ? `${z.label} (excluded)` : z.label, z.x * W + 6, z.y * H - 7);
   }
   if (placing && corners.length) {
     dctx.setLineDash([7, 5]); dctx.strokeStyle = "#fff"; dctx.lineWidth = 2;
@@ -254,7 +313,7 @@ async function startAnalysis() {
 
   const fd = new FormData();
   fd.append("file", state.file);
-  fd.append("zones", JSON.stringify(state.zones.map(({ id, label, type, x, y, w, h, poly }) => ({ id, label, type, x, y, w, h, poly }))));
+  fd.append("zones", JSON.stringify(state.zones.map(({ id, label, type, x, y, w, h, poly, line }) => ({ id, label, type, x, y, w, h, poly, line }))));
   fd.append("costs", JSON.stringify(Object.fromEntries(state.zones.map((z) => [z.id, z.cost]))));
   fd.append("crowd_mode", $("crowdMode").checked ? "on" : "auto");
   fd.append("demographics", $("demoMode").checked ? "on" : "off");
@@ -361,9 +420,26 @@ function renderReport(rep, jobId) {
     <div class="kpi"><div class="k">Peak concurrency</div><div class="v" data-count="${rep.peak_concurrency}">0</div></div>
     ${rep.avg_concurrency != null ? `<div class="kpi"><div class="k">Avg crowd density</div><div class="v">${fmt(rep.avg_concurrency, 1)}<small> ppl</small></div></div>` : ""}
     ${rep.scene3d && rep.scene3d.enabled ? `<div class="kpi" title="${GLOSS["3D calibration"]}"><div class="k">3D calibration <span class="new-tag">SCENE</span></div><div class="v">${fmt(rep.scene3d.calib_confidence, 0)}<small>% conf${rep.scene3d.camera_height_m ? " · cam " + fmt(rep.scene3d.camera_height_m, 1) + "m" : ""}</small></div></div>` : ""}
+    ${rep.capture_rate != null ? `<div class="kpi"><div class="k">Capture rate <span class="new-tag">NEW</span></div><div class="v">${fmt(rep.capture_rate, 1)}<small>%</small></div></div>` : ""}
+    ${rep.staff_excluded != null ? `<div class="kpi" title="Persons spending ≥30% of visible time (or ≥60s) inside a staff area are excluded from all metrics (Spec v1.0 §8)."><div class="k">Staff excluded</div><div class="v" data-count="${rep.staff_excluded}">0</div></div>` : ""}
     ${rep.zones.length ? `<div class="kpi"><div class="k">Best zone (AQS)</div><div class="v">${esc(best(rep).label)} <small>${best(rep).aqs}</small></div></div>` : ""}
     <div class="kpi"><div class="k">Zones analyzed</div><div class="v" data-count="${rep.zones.length}">0</div></div>
   </div>`;
+
+  if (rep.lines && rep.lines.length) {
+    html += `<div class="wide-chart"><h4>Entrance counting <span class="new-tag">NEW</span> — line crossings by tracked foot position (Spec v1.0 §5)</h4>
+      <div class="cpm-row">` + rep.lines.map((l) => `
+        <div class="cpm-box"><div class="k">${esc(l.label)}</div>
+          <div class="v">${l.enters} in · ${l.exits} out</div>
+          <div class="k">capture rate ${fmt(l.capture_rate, 1)}%${l.capture_rate_ci ? " · 95% CI " + l.capture_rate_ci[0] + "–" + l.capture_rate_ci[1] + "%" : ""}</div>
+        </div>`).join("") + `</div></div>`;
+  }
+  if (rep.lines_note) {
+    html += `<div class="wide-chart"><h4>Entrance counting</h4><p class="aud-note">${esc(rep.lines_note)}</p></div>`;
+  }
+  if (rep.reach_note) {
+    html += `<div class="wide-chart"><h4>Shelf interaction</h4><p class="aud-note">${esc(rep.reach_note)}</p></div>`;
+  }
 
   html += densitySvg(rep);
   if (rep.scene3d && rep.scene3d.enabled) {
@@ -970,6 +1046,7 @@ function zoneReport(z, still) {
       ${fstage("Impressions", z.impressions, z.traffic, z.impressions_ci ? `±${Math.max(z.impressions - z.impressions_ci[0], z.impressions_ci[1] - z.impressions)}` : "")}
       ${still ? "" : fstage("Engaged ≥1s", z.engaged, z.traffic, "")}
       ${still ? "" : fstage("Deep ≥3s", z.deep, z.traffic, "")}
+      ${!still && z.reaches != null ? fstage("Reached", z.reachers, z.traffic, "") : ""}
     </div>
 
     <div class="metric-grid">
@@ -980,6 +1057,8 @@ function zoneReport(z, still) {
       ${still || z.time_to_first_look == null ? "" : `<div class="mcard" title="${GLOSS["Time to first look"]}"><div class="k">Time to first look <span class="new-tag">NEW</span></div><div class="v">${fmt(z.time_to_first_look, 1)}<small>s</small></div></div>`}
       ${still ? "" : `<div class="mcard" title="${GLOSS["Glances / looker"]}"><div class="k">Glances / looker <span class="new-tag">NEW</span></div><div class="v">${fmt(z.glances_per_looker, 1)}</div></div>`}
       ${still ? "" : `<div class="mcard" title="${GLOSS["Stopping power"]}"><div class="k">Stopping power <span class="new-tag">NEW</span></div><div class="v">${fmt(z.stopping_power, 0)}<small>% slowdown</small></div></div>`}
+      ${!still && z.reaches != null ? `<div class="mcard" title="A wrist keypoint inside the shelf zone in ≥3 consecutive samples (Spec v1.0)."><div class="k">Reaches <span class="new-tag">NEW</span></div><div class="v">${z.reaches}</div></div>` : ""}
+      ${!still && z.reach_rate != null ? `<div class="mcard" title="Share of lookers who reached toward the shelf."><div class="k">Reach rate</div><div class="v">${fmt(z.reach_rate, 1)}<small>% of lookers</small></div></div>` : ""}
       ${z.size_m ? `<div class="mcard" title="${GLOSS["Zone size"]}"><div class="k">Zone size <span class="new-tag">3D</span></div><div class="v">${fmt(z.size_m[0], 1)}×${fmt(z.size_m[1], 1)}<small>m${z.surface_tilt_deg != null ? " · " + fmt(z.surface_tilt_deg, 0) + "° tilt" : ""}</small></div></div>` : ""}
       ${z.avg_view_distance_m != null ? `<div class="mcard" title="${GLOSS["View distance"]}"><div class="k">Avg view distance <span class="new-tag">3D</span></div><div class="v">${fmt(z.avg_view_distance_m, 1)}<small>m</small></div></div>` : ""}
     </div>
@@ -1000,6 +1079,12 @@ function zoneReport(z, still) {
       <h4>Evidence <span class="new-tag">AUDITABLE</span></h4>
       <div class="ev-chips">${z.evidence.map((e) =>
         `<button class="ev-chip" data-t="${e.start}">#${e.pid} · ${e.dur}s @ ${tstamp(e.start)}</button>`).join("")}</div>
+    </div>` : ""}
+    ${!still && z.reach_evidence && z.reach_evidence.length ? `
+    <div class="evidence">
+      <h4>Reach evidence <span class="new-tag">AUDITABLE</span></h4>
+      <div class="ev-chips">${z.reach_evidence.map((e) =>
+        `<button class="ev-chip" data-t="${e.t}">reach #${e.pid} @ ${tstamp(e.t)}</button>`).join("")}</div>
     </div>` : ""}
   </div>`;
 }

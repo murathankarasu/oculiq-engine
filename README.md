@@ -78,6 +78,25 @@ Enable via the **Crowded scene** checkbox (zones step) or leave on `auto`
   reports, and each zone gets a "portfolio rank #N of M zones" badge across all
   your analyzed locations — the beginning of a Nielsen-style normative dataset.
 
+## Retail measurement layer (Spec v1.0)
+
+All metric definitions are frozen in **`docs/SPEC.md`** (Measurement Spec v1.0);
+every report carries `"spec": "1.0"` and the PDF ends with a Methodology & trust page.
+
+- **Zone types** — billboard / screen / window / **shelf** / **display** /
+  **entrance line** / **staff area** (popover selector; lines drawn with 2 points).
+- **Entrance counting + capture rate** — foot-point line crossing with hysteresis
+  (`LineCounter`), directional in/out, capture rate = enters ÷ traffic, Wilson CI.
+- **Staff exclusion** — IDs spending ≥30% of visible time (or ≥60 s) in a staff
+  area are removed from all metrics; the report discloses the excluded count.
+- **Reach (shelf interaction)** — wrist keypoint inside a shelf zone in ≥3
+  consecutive samples = a reach; funnel becomes passed → looked → stopped → reached.
+  No reliable wrist signal → the report says so instead of printing zeros.
+- **Ground-truth tooling** — `tools/labeler.html` (blind human labeling on the
+  annotated video), `tools/evaluate.py` (precision/recall, dwell MAE, traffic
+  MAPE → `docs/ACCURACY.md`), `tools/regress.py` (fixed-clip regression gates —
+  run before merging any engine change).
+
 ## Engine signals (honest by design)
 
 - Person detection + persistent IDs: YOLO11-pose (x) + ByteTrack — counts people even

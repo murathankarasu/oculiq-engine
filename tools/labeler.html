@@ -1,0 +1,120 @@
+<!DOCTYPE html>
+<!-- Oculiq ground-truth labeler — fully local, no server needed.
+     Workflow: open this file in a browser → load the ANNOTATED video (person IDs
+     visible) + the job's report JSON → watch, mark per person × zone whether the
+     person actually looked (and optionally your dwell estimate in seconds) →
+     Export labels JSON → feed to tools/evaluate.py together with the report. -->
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>Oculiq — Ground-truth Labeler</title>
+<style>
+  :root { color-scheme: dark; }
+  body { background: #0b0b0c; color: #eee; font: 14px/1.5 -apple-system, sans-serif; margin: 0; padding: 24px; }
+  h1 { font-size: 18px; margin: 0 0 4px; } h1 b { color: #e0a43c; }
+  .sub { color: #999; margin-bottom: 18px; font-size: 12.5px; }
+  .row { display: flex; gap: 24px; align-items: flex-start; flex-wrap: wrap; }
+  video { max-width: 640px; width: 100%; background: #000; border-radius: 6px; }
+  table { border-collapse: collapse; font-size: 13px; }
+  th, td { border: 1px solid #2c2c30; padding: 5px 10px; text-align: center; }
+  th { color: #999; font-weight: 600; background: #151517; }
+  td.pid { font-weight: 700; cursor: pointer; color: #e0a43c; }
+  input[type=number] { width: 58px; background: #151517; color: #eee; border: 1px solid #333; border-radius: 4px; padding: 2px 4px; }
+  button { background: #e0a43c; color: #111; border: 0; border-radius: 5px; padding: 8px 14px; font-weight: 700; cursor: pointer; margin-right: 8px; }
+  button.ghost { background: #222; color: #ddd; }
+  .files { margin-bottom: 16px; display: flex; gap: 14px; flex-wrap: wrap; align-items: center; color: #bbb; }
+  .ok { color: #8fc29a; } .warn { color: #d38a7d; }
+  #meta { margin: 10px 0; color: #999; font-size: 12.5px; }
+</style>
+</head>
+<body>
+<h1><b>Oculiq.</b> ground-truth labeler <small>(Spec v1.0)</small></h1>
+<div class="sub">Load the <b>annotated</b> video (IDs visible) and the job's <b>report JSON</b>. Click a person ID to seek to their first appearance. Mark <b>looked</b> per person × zone; add your own dwell estimate (s) if you can. Export and run <code>tools/evaluate.py</code>.</div>
+
+<div class="files">
+  <label>Annotated video <input type="file" id="vid" accept="video/*" /></label>
+  <label>report.json <input type="file" id="rep" accept=".json,application/json" /></label>
+  <span id="status" class="warn">waiting for files…</span>
+</div>
+
+<div class="row">
+  <div>
+    <video id="v" controls playsinline></video>
+    <div id="meta"></div>
+    <button id="export" disabled>⬇ Export labels JSON</button>
+    <button class="ghost" id="markAllNo" disabled>All unmarked → "not looked"</button>
+  </div>
+  <div id="gridWrap"></div>
+</div>
+
+<script>
+let report = null, labels = {};   // labels["pid:zid"] = {looked, dwell}
+const $ = (id) => document.getElementById(id);
+
+$("vid").onchange = (e) => {
+  const f = e.target.files[0];
+  if (f) { $("v").src = URL.createObjectURL(f); check(); }
+};
+$("rep").onchange = async (e) => {
+  const f = e.target.files[0];
+  if (!f) return;
+  report = JSON.parse(await f.text());
+  buildGrid(); check();
+};
+function check() {
+  if (report && $("v").src) { $("status").textContent = "ready — label away"; $("status").className = "ok";
+    $("export").disabled = $("markAllNo").disabled = false; }
+}
+
+function buildGrid() {
+  const pids = Object.keys((report.sim && report.sim.persons) || {}).map(Number).sort((a, b) => a - b);
+  const zones = report.zones || [];
+  const dw = (report.sim && report.sim.dwell) || {};
+  $("meta").textContent = `${pids.length} tracked persons · ${zones.length} zones · engine min_dwell ${(report.sim||{}).min_dwell || 0.4}s — engine's own answer is hidden on purpose (label blind, then compare).`;
+  let h = "<table><tr><th>person</th>";
+  for (const z of zones) h += `<th>${z.label}<br/>looked / your dwell (s)</th>`;
+  h += "</tr>";
+  for (const pid of pids) {
+    h += `<tr><td class="pid" data-pid="${pid}">#${pid}</td>`;
+    for (const z of zones) {
+      const k = `${pid}:${z.id}`;
+      h += `<td>
+        <select data-k="${k}" class="lk">
+          <option value="">—</option><option value="yes">looked</option><option value="no">not looked</option><option value="unsure">unsure</option>
+        </select>
+        <input type="number" step="0.5" min="0" placeholder="s" data-dk="${k}" />
+      </td>`;
+    }
+    h += "</tr>";
+  }
+  $("gridWrap").innerHTML = h + "</table>";
+  document.querySelectorAll("td.pid").forEach((td) => td.onclick = () => {
+    const t = report.sim.persons[td.dataset.pid];
+    if (t != null) { $("v").currentTime = Math.max(0, t - 0.5); $("v").play(); }
+  });
+}
+
+$("markAllNo").onclick = () => {
+  document.querySelectorAll("select.lk").forEach((s) => { if (!s.value) s.value = "no"; });
+};
+
+$("export").onclick = () => {
+  const out = { spec: report.spec || "1.0", video_duration: report.duration,
+                engine_traffic: report.traffic, human_traffic: null, labels: [] };
+  const ht = prompt("Your own total unique-person count (traffic) — leave empty to skip:");
+  if (ht) out.human_traffic = parseInt(ht, 10) || null;
+  document.querySelectorAll("select.lk").forEach((s) => {
+    if (!s.value || s.value === "unsure") return;
+    const [pid, zid] = s.dataset.k.split(":").map(Number);
+    const d = document.querySelector(`[data-dk="${s.dataset.k}"]`).value;
+    out.labels.push({ pid, zid, looked: s.value === "yes",
+                      dwell: d === "" ? null : parseFloat(d) });
+  });
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(new Blob([JSON.stringify(out, null, 1)], { type: "application/json" }));
+  a.download = "labels.json";
+  a.click();
+};
+</script>
+</body>
+</html>

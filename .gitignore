@@ -9,3 +9,8 @@ models/rtmlib/
 __pycache__/
 *.pyc
 .DS_Store
+tools/regress_data/*.mp4
+Oculiq-Strateji-Raporu.pdf
+Oculiq-Yatirimci-Sunumu.pptx
+tools/regress_data/*.jpg
+tools/regress_data/*.annotated.mp4

@@ -92,7 +92,7 @@
             <div class="zone-pop hidden" id="zonePop">
               <input id="zpLabel" placeholder="e.g. Billboard A" maxlength="40" />
               <div class="zp-row">
-                <select id="zpType"><option value="billboard">billboard</option><option value="screen">digital screen</option><option value="window">shop window</option></select>
+                <select id="zpType"><option value="billboard">billboard</option><option value="screen">digital screen</option><option value="window">shop window</option><option value="shelf">shelf</option><option value="display">display / stand</option><option value="staff">staff area (excluded)</option></select>
                 <input id="zpCost" type="number" min="0" placeholder="cost/day" />
               </div>
               <div class="zp-row"><button id="zpSave" class="primary sm">Save zone</button><button id="zpCancel" class="sm">Cancel</button></div>
@@ -100,7 +100,8 @@
           </div>
           <div class="controls">
             <button id="zoneBtn" class="primary">+ Draw zone</button>
-            <span class="hint">click the 4 corners of the ad surface</span>
+            <button id="lineBtn">+ Entrance line</button>
+            <span class="hint" id="drawHint">click the 4 corners of the ad surface</span>
             <span class="spacer"></span>
             <label class="chk"><input type="checkbox" id="crowdMode" /> Crowded scene <small>tiled multi-scan</small></label>
             <label class="chk"><input type="checkbox" id="demoMode" checked /> Audience insights <small>beta · aggregate gender</small></label>

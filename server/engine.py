@@ -211,6 +211,48 @@ class KCalibrator:
                 "k_bottom": self.k_bot, "samples": self.n}
 
 
+class LineCounter:
+    """Giriş-çıkış çizgisi sayacı (Spec v1.0 §5).
+
+    Çizgi 2 noktayla tanımlı; "in" = p1→p2 vektörünün SOL normali yönü
+    (arayüzdeki ok o yönü gösterir). Kişinin ayak noktası çizgiden histerezis
+    bandı kadar uzaklaşmadan taraf onaylanmaz — çizgi üstünde duran kişi
+    titreşimle çift sayılmaz. Onaylı taraf değiştiğinde ve ayak izdüşümü
+    segment içindeyken (±%10 pay) geçiş sayılır."""
+
+    def __init__(self, zid, p1, p2):
+        self.zid = zid
+        self.p1 = p1
+        dx, dy = p2[0] - p1[0], p2[1] - p1[1]
+        self.length = math.hypot(dx, dy) or 1e-6
+        self.ux, self.uy = dx / self.length, dy / self.length      # çizgi yönü
+        self.nx, self.ny = -self.uy, self.ux                       # sol normal = "in"
+        self.side = {}      # pid -> onaylı taraf (+1 in tarafı, -1 out tarafı)
+        self.events = []    # (t, pid, "in"|"out")
+
+    def update(self, pid, foot, h, t):
+        rx, ry = foot[0] - self.p1[0], foot[1] - self.p1[1]
+        d = rx * self.nx + ry * self.ny                 # imzalı dik uzaklık
+        hyst = max(0.15 * h, 0.02 * self.length)
+        if abs(d) < hyst:
+            return                                       # bant içinde: karar yok
+        s = 1 if d > 0 else -1
+        prev = self.side.get(pid)
+        if prev is None:
+            self.side[pid] = s
+            return
+        if s != prev:
+            u = (rx * self.ux + ry * self.uy) / self.length
+            if -0.1 <= u <= 1.1:                         # segmentin gerçekten üstünden
+                self.events.append((round(t, 2), pid, "in" if s > 0 else "out"))
+            self.side[pid] = s
+
+    def counts(self, valid_pids=None):
+        ev = [e for e in self.events if valid_pids is None or e[1] in valid_pids]
+        return (sum(1 for e in ev if e[2] == "in"),
+                sum(1 for e in ev if e[2] == "out"), ev)
+
+
 class AttentionEngine:
     def __init__(self, model_name="yolo11x-pose.pt", cone_deg=35.0, min_dwell=0.4,
                  kp_conf=0.35, min_mag=0.10, imgsz=960, tile_imgsz=896,
@@ -443,6 +485,12 @@ class AttentionEngine:
                            max(p[1] for p in pts) - min(p[1] for p in pts), h * 0.18)
                 half = span * 1.1
                 d["face_box"] = (cx - half, cy - half, half * 2, half * 2.2)
+        # bilekler (COCO 9/10) — raf-etkileşim "reach" ölçümü (Spec v1.0 §2)
+        if raw["kp"] is not None:
+            wr = [(float(raw["kp"][wi][0]), float(raw["kp"][wi][1]))
+                  for wi in (9, 10) if raw["kc"][wi] >= self.kp_conf]
+            if wr:
+                d["wrists"] = wr
         return d
 
     def _detect_frame(self, frame, tiled, tracker):
@@ -519,6 +567,15 @@ class AttentionEngine:
         scene = None       # sahne 3D modeli (video ortasinda kurulur, overlay'e girer)
         zquads = {}
         zs = self._prep_zones(zones, W, H)
+        zs_att, z_lines, z_staff = self._split_zones(zs)
+        line_counters = [LineCounter(z["id"], z["line_px"][0], z["line_px"][1])
+                         for z in z_lines]
+        if z_lines:
+            _jlog(job, f"Entrance counting: {len(z_lines)} line(s) active")
+        z_shelf = [z for z in zs_att if z["type"] == "shelf"]
+        wrist_samples = 0     # reach sinyal kapsaması (dürüstlük: sinyal yoksa susulur)
+        if z_shelf:
+            _jlog(job, f"Shelf interaction (reach): {len(z_shelf)} shelf zone(s) active")
         persons = {}
         heat = np.zeros((H // 4, W // 4), np.float32)
         timeline = defaultdict(lambda: defaultdict(float))
@@ -641,8 +698,8 @@ class AttentionEngine:
                             job["scene_view"] = str(vp)
                     if scene_ok:
                         scene._grid = scene.grid_segments()
-                        zquads = {z["id"]: scene.zone_quad(z) for z in zs}
-                        for zz, q in zip(zs, zquads.values()):   # yüzey mesh'i bir kez hesapla
+                        zquads = {z["id"]: scene.zone_quad(z) for z in zs_att}
+                        for zz, q in zip(zs_att, zquads.values()):   # yüzey mesh'i bir kez hesapla
                             if q:
                                 q["_mesh"], q["_nseg"] = scene.zone_mesh(q)
                                 _jlog(job, f"{zz['label']}: placed on 3D surface — "
@@ -697,6 +754,35 @@ class AttentionEngine:
                 fs = p.setdefault("foot_sum", [0.0, 0.0, 0])
                 fs[0] += foot[0]; fs[1] += foot[1]; fs[2] += 1
 
+                for lc in line_counters:            # giriş-çıkış: ayak noktasıyla
+                    lc.update(d["id"], foot, float(bh), t)
+
+                p["seen_sec"] = p.get("seen_sec", 0.0) + dtf
+                for zst in z_staff:                 # personel alanında geçen süre
+                    if self._pt_in_zone(foot, zst):
+                        p["staff_sec"] = p.get("staff_sec", 0.0) + dtf
+                        break
+
+                if z_shelf:                         # raf-etkileşim: bilek bölgede
+                    wr = d.get("wrists")
+                    if wr:
+                        wrist_samples += 1
+                    runs = p.setdefault("reach_run", {})
+                    act = p.setdefault("reaching", {})
+                    for zsh in z_shelf:
+                        zid_ = zsh["id"]
+                        touching = bool(wr) and any(self._pt_in_zone(w_, zsh) for w_ in wr)
+                        if touching:
+                            runs[zid_] = runs.get(zid_, 0) + 1
+                            # ≥3 ardışık örnek = reach (Spec §2); epizot başına 1 kez
+                            if runs[zid_] >= 3 and not act.get(zid_):
+                                act[zid_] = True
+                                p.setdefault("reach_events", {}) \
+                                 .setdefault(zid_, []).append(round(t, 1))
+                        else:
+                            runs[zid_] = 0
+                            act[zid_] = False
+
                 # bakış ışını kaydı: yön taşıyan her ölçüm (frontal (0,0) hariç)
                 if (d["dx"] is not None and (d["dx"] or d["dy"]) and len(rays) < 80000):
                     ray = [round(t, 2), d["id"], int(d["c"][0]), int(d["c"][1]),
@@ -709,7 +795,7 @@ class AttentionEngine:
                         ray += [round(float(v), 3) for v in d["dir3"]]
                     rays.append(ray)
 
-                for z in zs:
+                for z in zs_att:
                     q = zquads.get(z["id"])
                     if "head3" in d and q:   # Faz 2: gerçek 3D ışın-yüzey testi
                         raw_look = (d["sig"] in ("head", "body")
@@ -750,9 +836,11 @@ class AttentionEngine:
                     demo_note = self._demo_err or "classifier unavailable"
 
 
+            line_counts = {lc.zid: lc.counts()[:2] for lc in line_counters}
             annotated = self._draw(frame, dets, zs, heat, t, len(persons), tiled,
                                    scene=scene if scene_ok else None,
-                                   zquads=zquads, blur=face_blur)
+                                   zquads=zquads, blur=face_blur,
+                                   line_counts=line_counts)
             want = max(written + 1, int(round((t - t_first) * out_fps)) + 1)
             for _ in range(min(4, want - written)):
                 writer.write(annotated)
@@ -765,7 +853,7 @@ class AttentionEngine:
                 if job["progress"] < ms <= new_pct:
                     _jlog(job, f"{ms}% — {len(persons)} people tracked so far")
             job["progress"] = new_pct
-            job["live"] = self._live(persons, zs, t)
+            job["live"] = self._live(persons, zs_att, t, line_counters)
             if job.get("cancel"):
                 break
 
@@ -780,10 +868,25 @@ class AttentionEngine:
 
         # stability filter: ghosts seen in a single sampled frame don't count
         persons = {k: v for k, v in persons.items() if v["frames"] >= self.min_sightings}
+        # personel hariç tutma (Spec v1.0 §8): görünür sürenin ≥%30'u veya ≥60s
+        # personel alanında geçen ID'ler TÜM metriklerden düşülür — şeffafça raporlanır
+        staff_excluded = 0
+        if z_staff:
+            staff_ids = {k for k, v in persons.items()
+                         if v.get("staff_sec", 0) >= 60
+                         or v.get("staff_sec", 0) >= 0.3 * max(v.get("seen_sec", 0), 1e-6)}
+            staff_excluded = len(staff_ids)
+            persons = {k: v for k, v in persons.items() if k not in staff_ids}
+            if staff_excluded:
+                _jlog(job, f"Staff exclusion: {staff_excluded} person(s) removed from all metrics")
         rays = [r for r in rays if r[1] in persons]  # hayaletlerin ışınları da elenir
         sim = {"w": W, "h": H, "dt": round(dt, 4), "cone_deg": self.cone_deg,
                "min_dwell": self.min_dwell, "k": self.persp_k, "auto_cone": self.auto_cone,
                "persons": {str(k): round(v["first_t"], 2) for k, v in persons.items()},
+               # kişi-başına ölçülmüş dwell — ground-truth değerlendirmesi bunu kullanır
+               "dwell": {str(k): {str(zid): round(dv, 2)
+                                  for zid, dv in v["dwell"].items() if dv >= 0.05}
+                         for k, v in persons.items()},
                "rays": rays}
         if scene_ok and scene.up() is not None:
             grid = scene.depth_grid()
@@ -791,12 +894,33 @@ class AttentionEngine:
                 sim["s3"] = {"f": round(scene.f, 1), "cx": scene.cx, "cy": scene.cy,
                              "up": [round(float(v), 4) for v in scene.up()],
                              "grid": grid}
-        report = self._report(persons, zs, timeline, duration, peak, cost_map or {},
+        report = self._report(persons, zs_att, timeline, duration, peak, cost_map or {},
                               still=False, elapsed=time.time() - t0, sim=sim)
         report["scan_mode"] = "tiled multi-scan (crowd)" if tiled else "single-pass"
         report["calibration"] = self._cal.state()
+        if z_staff:
+            report["staff_excluded"] = staff_excluded
+        if z_shelf and wrist_samples == 0:   # dürüstlük: sinyal yoksa 0 basılmaz, söylenir
+            report["reach_note"] = ("no reach signal — wrist keypoints were not reliable "
+                                    "in this footage (far camera / crowd mode)")
+        if line_counters:
+            traffic_n = len(persons)
+            lines_out = []
+            for z, lc in zip(z_lines, line_counters):
+                ins, outs, ev = lc.counts(set(persons.keys()))
+                lo, hi = _wilson(min(ins, traffic_n), traffic_n)
+                lines_out.append({
+                    "id": z["id"], "label": z["label"],
+                    "line": z.get("line_norm"),
+                    "enters": ins, "exits": outs,
+                    "capture_rate": round(ins / traffic_n * 100, 1) if traffic_n else 0.0,
+                    "capture_rate_ci": [round(lo * 100, 1), round(hi * 100, 1)],
+                    "events": [{"t": e[0], "pid": e[1], "dir": e[2]} for e in ev[:200]],
+                })
+            report["lines"] = lines_out
+            report["capture_rate"] = lines_out[0]["capture_rate"] if lines_out else None
         self._attach_scene3d(report, sim_frame_img if sim_frame_img is not None else frame,
-                             foot_samples, persons, zs, job, prebuilt=scene)
+                             foot_samples, persons, zs_att, job, prebuilt=scene)
         if gaze_total and isinstance(report.get("scene3d"), dict):
             report["scene3d"]["gaze3d_pct"] = round(gaze3d_n / gaze_total * 100, 1)
         if demographics and persons:
@@ -819,6 +943,7 @@ class AttentionEngine:
         tiled = self._use_tiles(W, H, crowd_mode)
         self._cal = KCalibrator(H, fallback=self.persp_k)
         zs = self._prep_zones(zones, W, H)
+        zs_att, z_lines, z_staff = self._split_zones(zs)
 
         if tiled:
             raws = self._detect_tiled(frame)
@@ -841,7 +966,7 @@ class AttentionEngine:
             p = {"first_t": 0, "frames": self.min_sightings, "dwell": defaultdict(float),
                  "episodes": defaultdict(int), "first_look": {}, "v": [], "v_look": [],
                  "sig_sec": defaultdict(float)}
-            for z in zs:
+            for z in zs_att:
                 if (d["sig"] in ("head", "body")
                         and self.looks_at(d, z)):
                     p["dwell"][z["id"]] = 1.0
@@ -850,6 +975,15 @@ class AttentionEngine:
                     d["zone"] = z["id"]
                     self._heat_add(heat, d, z, W, H)
             persons[i] = p
+
+        staff_excluded = 0
+        if z_staff:   # fotoğrafta: personel alanı içindeki kişi metriklere girmez
+            for i, d in enumerate(dets):
+                bx, by, bw, bh = d["box"]
+                if any(self._pt_in_zone((bx + bw / 2, by + bh), zst) for zst in z_staff):
+                    persons.pop(i, None)
+                    staff_excluded += 1
+            rays = [r for r in rays if r[1] in persons]
 
         annotated = self._draw(frame, dets, zs, heat, None, len(dets), tiled, blur=face_blur)
         out_path = Path(path).with_suffix(".annotated.jpg")
@@ -861,10 +995,14 @@ class AttentionEngine:
         sim = {"w": W, "h": H, "dt": 1.0, "cone_deg": self.cone_deg, "min_dwell": 0.5,
                "k": self.persp_k, "auto_cone": self.auto_cone,
                "persons": {str(k): 0.0 for k in persons}, "rays": rays}
-        report = self._report(persons, zs, {}, 0, len(dets), cost_map or {},
+        report = self._report(persons, zs_att, {}, 0, len(dets), cost_map or {},
                               still=True, elapsed=0, sim=sim)
         report["scan_mode"] = "tiled multi-scan (crowd)" if tiled else "single-pass"
         report["calibration"] = self._cal.state()
+        if z_lines:   # dürüstlük: fotoğrafta geçiş ölçülemez, uydurulmaz
+            report["lines_note"] = "entrance lines require video — not measured on a still image"
+        if z_staff:
+            report["staff_excluded"] = staff_excluded
         foot_samples = [(d["box"][0] + d["box"][2] / 2.0,
                          d["box"][1] + float(d["box"][3]), float(d["box"][3]), d["id"])
                         for d in dets if d.get("fb_ok") and d["box"][3] >= 40]
@@ -873,8 +1011,9 @@ class AttentionEngine:
                              d["box"][1] + float(d["box"][3]), float(d["box"][3]), d["id"])
                             for d in dets]
         for i, d in enumerate(dets):  # fotoda kişi ayağı = tek örnek
-            persons[i]["foot_sum"] = [foot_samples[i][0], foot_samples[i][1], 1]
-        self._attach_scene3d(report, frame, foot_samples, persons, zs, job)
+            if i in persons and i < len(foot_samples):
+                persons[i]["foot_sum"] = [foot_samples[i][0], foot_samples[i][1], 1]
+        self._attach_scene3d(report, frame, foot_samples, persons, zs_att, job)
         if demographics and persons:
             id_persons = {d["id"]: persons[i] for i, d in enumerate(dets)}
             if self._gender_pass(frame, dets, id_persons):
@@ -887,7 +1026,7 @@ class AttentionEngine:
                 sc = SceneModel().build(frame, foot_samples)
                 if sc.enabled and sc.reliable():
                     sc._grid = sc.grid_segments()
-                    zq = {z["id"]: sc.zone_quad(z) for z in zs}
+                    zq = {z["id"]: sc.zone_quad(z) for z in zs_att}
                     for q in zq.values():
                         if q:
                             q["_mesh"], q["_nseg"] = sc.zone_mesh(q)
@@ -997,6 +1136,12 @@ class AttentionEngine:
             if poly and len(poly) == 4:
                 poly_px = [(float(px) * W, float(py) * H) for px, py in poly]
                 center = (sum(p[0] for p in poly_px) / 4, sum(p[1] for p in poly_px) / 4)
+            line = z.get("line")
+            line_px = None
+            if line and len(line) == 2:
+                line_px = [(float(px) * W, float(py) * H) for px, py in line]
+                center = ((line_px[0][0] + line_px[1][0]) / 2,
+                          (line_px[0][1] + line_px[1][1]) / 2)
             out.append({
                 "id": z.get("id", i), "label": z.get("label", f"Zone {i+1}"),
                 "type": z.get("type", "billboard"),
@@ -1004,10 +1149,38 @@ class AttentionEngine:
                 "norm": (z["x"], z["y"], z["w"], z["h"]),
                 "poly_px": poly_px,
                 "poly_norm": poly if poly and len(poly) == 4 else None,
+                "line_px": line_px,
+                "line_norm": line if line and len(line) == 2 else None,
                 "center": center,
                 "color": ZONE_COLORS[i % len(ZONE_COLORS)],
             })
         return out
+
+    @staticmethod
+    def _pt_in_zone(pt, z):
+        """Nokta bölge içinde mi — poligon varsa ray-cast, yoksa dikdörtgen."""
+        poly = z.get("poly_px")
+        if not poly:
+            x, y, w, h = z["rect"]
+            return x <= pt[0] <= x + w and y <= pt[1] <= y + h
+        inside = False
+        j = len(poly) - 1
+        for i in range(len(poly)):
+            xi, yi = poly[i]
+            xj, yj = poly[j]
+            if (yi > pt[1]) != (yj > pt[1]) and \
+               pt[0] < (xj - xi) * (pt[1] - yi) / ((yj - yi) or 1e-9) + xi:
+                inside = not inside
+            j = i
+        return inside
+
+    @staticmethod
+    def _split_zones(zs):
+        """Ölçüm rolüne göre ayır: dikkat yüzeyleri / giriş çizgileri / personel."""
+        att = [z for z in zs if z["type"] not in ("line", "staff")]
+        lines = [z for z in zs if z["type"] == "line" and z.get("line_px")]
+        staff = [z for z in zs if z["type"] == "staff"]
+        return att, lines, staff
 
     def _heat_add(self, heat, d, z, W, H):
         zc = z["center"]
@@ -1019,12 +1192,17 @@ class AttentionEngine:
         py = min(max(py, y), y + h) / 4
         cv2.circle(heat, (int(px), int(py)), max(6, W // 200), 1.0, -1)
 
-    def _live(self, persons, zs, t):
+    def _live(self, persons, zs, t, line_counters=None):
         live = {"t": round(t, 1), "traffic": len(persons), "zones": {}}
         for z in zs:
             att = sum(p["dwell"][z["id"]] for p in persons.values())
             lk = sum(1 for p in persons.values() if p["dwell"][z["id"]] >= self.min_dwell)
             live["zones"][str(z["id"])] = {"label": z["label"], "lookers": lk, "att": round(att, 1)}
+        if line_counters:
+            live["lines"] = {}
+            for lc in line_counters:
+                ins, outs, _ = lc.counts()
+                live["lines"][str(lc.zid)] = {"in": ins, "out": outs}
         return live
 
     def _report(self, persons, zs, timeline, duration, peak, cost_map, still, elapsed, sim=None):
@@ -1097,8 +1275,19 @@ class AttentionEngine:
                 "timeline": [{"t": b, "sec": round(v.get(zid, 0), 2)}
                              for b, v in sorted(timeline.items())],
             })
+            if z["type"] == "shelf" and not still:
+                # reach: funnel'ın 4. katmanı (geçti→baktı→durdu→uzandı)
+                evs = [(pid_, tt) for pid_, pp in persons.items()
+                       for tt in pp.get("reach_events", {}).get(zid, [])]
+                zo = zones_out[-1]
+                zo["reaches"] = len(evs)
+                zo["reachers"] = len({pid_ for pid_, _ in evs})
+                zo["reach_rate"] = round(zo["reachers"] / imp * 100, 1) if imp else 0.0
+                zo["reach_evidence"] = [{"pid": pid_, "t": tt}
+                                        for pid_, tt in sorted(evs, key=lambda e: e[1])[:8]]
 
         report = {
+            "spec": "1.0",
             "method": "orientation-based attention (head-pose primary, on-device)",
             "model": "YOLO11-pose x + ByteTrack",
             "still": still,
@@ -1123,7 +1312,7 @@ class AttentionEngine:
 
     # ---------- rendering ----------
     def _draw(self, frame, dets, zs, heat, t, traffic, tiled=False, scene=None,
-              zquads=None, blur=True):
+              zquads=None, blur=True, line_counts=None):
         out = frame.copy()
         H, W = out.shape[:2]
         sc = max(W / 1280, 0.8)
@@ -1171,6 +1360,48 @@ class AttentionEngine:
 
         for z in zs:
             x, y, w, h = z["rect"]
+            if z["type"] == "line" and z.get("line_px"):
+                # giriş çizgisi: kalın çizgi + IN yönü oku + canlı sayaç
+                (lx1, ly1), (lx2, ly2) = z["line_px"]
+                a = (int(lx1), int(ly1)); b_ = (int(lx2), int(ly2))
+                cv2.line(out, a, b_, (12, 12, 12), max(5, int(4 * sc)), cv2.LINE_AA)
+                cv2.line(out, a, b_, z["color"], max(3, int(2.5 * sc)), cv2.LINE_AA)
+                mx, my = (lx1 + lx2) / 2, (ly1 + ly2) / 2
+                ll = math.hypot(lx2 - lx1, ly2 - ly1) or 1
+                nx_, ny_ = -(ly2 - ly1) / ll, (lx2 - lx1) / ll     # sol normal = IN
+                al = max(30.0, ll * 0.18)
+                cv2.arrowedLine(out, (int(mx), int(my)),
+                                (int(mx + nx_ * al), int(my + ny_ * al)),
+                                z["color"], max(2, int(2 * sc)), cv2.LINE_AA, tipLength=0.35)
+                cnt = (line_counts or {}).get(z["id"])
+                label = f'{z["label"]}  |  in {cnt[0]} out {cnt[1]}' if cnt else z["label"]
+                (tw, th), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.55 * sc, 2)
+                lx0, ly0 = int(mx - tw / 2), int(min(ly1, ly2)) - 10
+                cv2.rectangle(out, (lx0 - 7, ly0 - th - 7), (lx0 + tw + 7, ly0 + 7),
+                              z["color"], -1)
+                cv2.putText(out, label, (lx0, ly0), cv2.FONT_HERSHEY_SIMPLEX,
+                            0.55 * sc, WHITE, 2, cv2.LINE_AA)
+                continue
+            if z["type"] == "staff":
+                # personel alanı: kesikli gri çerçeve — metriklere girmez
+                ppx_s = z.get("poly_px")
+                pts_s = (np.array(ppx_s, np.int32) if ppx_s
+                         else np.array([(x, y), (x + w, y), (x + w, y + h), (x, y + h)],
+                                       np.int32))
+                for i in range(len(pts_s)):
+                    p1_, p2_ = pts_s[i], pts_s[(i + 1) % len(pts_s)]
+                    seg = math.hypot(*(p2_ - p1_)) or 1
+                    n_dash = max(4, int(seg / (14 * sc)))
+                    for j in range(0, n_dash, 2):
+                        q1 = p1_ + (p2_ - p1_) * (j / n_dash)
+                        q2 = p1_ + (p2_ - p1_) * (min(j + 1, n_dash) / n_dash)
+                        cv2.line(out, tuple(q1.astype(int)), tuple(q2.astype(int)),
+                                 GRAY, max(2, int(2 * sc)), cv2.LINE_AA)
+                label = f'{z["label"]}  |  staff (excluded)'
+                (tw, th), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.5 * sc, 1)
+                cv2.putText(out, label, (int(pts_s[0][0]) + 4, int(pts_s[0][1]) - 6),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.5 * sc, GRAY, 1, cv2.LINE_AA)
+                continue
             ppx = z.get("poly_px")
             pts = np.array(ppx, np.int32) if ppx else None
             ov = out.copy()
