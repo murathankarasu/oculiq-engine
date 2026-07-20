@@ -531,6 +531,144 @@ class AttentionEngine:
         return W * H >= 1920 * 1080  # auto: hi-res CCTV -> tiled
 
     # ---------- video ----------
+    def _step_frame(self, st, dets, t, dtf, b):
+        """Kare-başı ölçüm çekirdeği — batch (process_video) ve canlı (stream.py)
+        AYNI yolu kullanır; Spec v1.0 davranışı tek yerde yaşar.
+
+        st: paylaşılan durum sözlüğü — persons/heat/timeline/rays vs. yerinde
+        değişir; gaze3d_n / gaze_total / wrist_samples sayaçları st'de tutulur.
+        record_rays=False canlı modda ışın kaydını kapatır (bellek + GDPR)."""
+        persons = st["persons"]
+        rays = st["rays"]
+        heat = st["heat"]
+        timeline = st["timeline"]
+        foot_samples = st["foot_samples"]
+        line_counters = st["line_counters"]
+        z_staff, z_shelf, zs_att = st["z_staff"], st["z_shelf"], st["zs_att"]
+        scene, scene_ok, zquads = st["scene"], st["scene_ok"], st["zquads"]
+        W, H = st["W"], st["H"]
+
+        # 3D bakış: kafa konumu + dünya-uzayı yön (yalnızca güven kapısı AÇIKKEN)
+        if scene_ok:
+            for d in dets:
+                if d["dx"] is None or (d["dx"] == 0 and d["dy"] == 0):
+                    continue
+                bx, by, bw, bh = d["box"]
+                h3 = scene.head_pos(bx + bw / 2.0, by + float(bh))
+                if h3 is None:
+                    continue
+                # sağlama: kafa 3D'si, kişinin gerçek baş pikseline geri düşmeli
+                pr = scene.project(h3)
+                if (pr is None or abs(pr[0] - (bx + bw / 2.0)) > bh * 1.2
+                        or abs(pr[1] - by) > bh * 1.2):
+                    d["z_bad"] = True   # 3D konum doğrulanamadı: derinlik bilinmiyor
+                    continue
+                g3 = scene.gaze_dir3d(d["dx"], d["dy"], d.get("k", self.persp_k), d["sig"])
+                if g3 is not None:
+                    d["head3"], d["dir3"] = h3, g3
+
+        for d in dets:
+            p = persons.setdefault(d["id"], {
+                "first_t": t, "frames": 0, "dwell": defaultdict(float),
+                "episodes": defaultdict(int), "looking": defaultdict(bool),
+                "hist": defaultdict(lambda: deque(maxlen=self.smooth_n)),
+                "intervals": defaultdict(list),
+                "first_look": {}, "pos": None, "v": [], "v_look": [],
+                "sig_sec": defaultdict(float),
+            })
+            p["frames"] += 1
+            if p["pos"] is not None:
+                v = math.dist(d["c"], p["pos"]) / dtf / max(d["h"], 1)
+                p["v"].append(v)
+                d["v"] = v
+            p["pos"] = d["c"]
+            # scene3d örnekleri + kişinin ortalama ayak noktası
+            bx, by, bw, bh = d["box"]
+            foot = (bx + bw / 2.0, by + float(bh))
+            if (len(foot_samples) < 600 and d.get("fb_ok")
+                    and foot[1] < H - 4 and bh >= 40
+                    and p.get("fs_n", 0) < 15):   # kişi başına ≤15 örnek (denge)
+                foot_samples.append((foot[0], foot[1], float(bh), d["id"]))
+                p["fs_n"] = p.get("fs_n", 0) + 1
+            fs = p.setdefault("foot_sum", [0.0, 0.0, 0])
+            fs[0] += foot[0]; fs[1] += foot[1]; fs[2] += 1
+
+            for lc in line_counters:            # giriş-çıkış: ayak noktasıyla
+                lc.update(d["id"], foot, float(bh), t)
+
+            p["seen_sec"] = p.get("seen_sec", 0.0) + dtf
+            for zst in z_staff:                 # personel alanında geçen süre
+                if self._pt_in_zone(foot, zst):
+                    p["staff_sec"] = p.get("staff_sec", 0.0) + dtf
+                    break
+
+            if z_shelf:                         # raf-etkileşim: bilek bölgede
+                wr = d.get("wrists")
+                if wr:
+                    st["wrist_samples"] += 1
+                runs = p.setdefault("reach_run", {})
+                act = p.setdefault("reaching", {})
+                for zsh in z_shelf:
+                    zid_ = zsh["id"]
+                    touching = bool(wr) and any(self._pt_in_zone(w_, zsh) for w_ in wr)
+                    if touching:
+                        runs[zid_] = runs.get(zid_, 0) + 1
+                        # ≥3 ardışık örnek = reach (Spec §2); epizot başına 1 kez
+                        if runs[zid_] >= 3 and not act.get(zid_):
+                            act[zid_] = True
+                            p.setdefault("reach_events", {}) \
+                             .setdefault(zid_, []).append(round(t, 1))
+                    else:
+                        runs[zid_] = 0
+                        act[zid_] = False
+
+            # bakış ışını kaydı: yön taşıyan her ölçüm (frontal (0,0) hariç)
+            if (st.get("record_rays", True) and d["dx"] is not None
+                    and (d["dx"] or d["dy"]) and len(rays) < 80000):
+                ray = [round(t, 2), d["id"], int(d["c"][0]), int(d["c"][1]),
+                       round(d["dx"], 3), round(d["dy"], 3),
+                       round(d.get("v", 0), 2),
+                       1 if d["sig"] == "body" else 0,
+                       d["k"], d["cone"]]
+                if "head3" in d:  # 3D alanlar: kafa konumu + dünya yönü
+                    ray += [round(float(v), 2) for v in d["head3"]]
+                    ray += [round(float(v), 3) for v in d["dir3"]]
+                rays.append(ray)
+
+            for z in zs_att:
+                q = zquads.get(z["id"])
+                if "head3" in d and q:   # gerçek 3D ışın-yüzey testi
+                    raw_look = (d["sig"] in ("head", "body")
+                                and scene.looks_at_3d(d["head3"], d["dir3"], q,
+                                                      d.get("cone", 14.0), d["sig"]))
+                    st["gaze3d_n"] += 1
+                else:                    # sahne yokken 2.5D azimut testi
+                    raw_look = (d["sig"] in ("head", "body")
+                                and self.looks_at(d, z,
+                                                  tight=d.get("z_bad", False)))
+                st["gaze_total"] += 1
+                p["hist"][z["id"]].append(raw_look)
+                hist = p["hist"][z["id"]]
+                # temporal majority vote — "oyun mantığı": tek karelik titremeyi ele
+                look = (sum(hist) * 2 > len(hist)) if len(hist) >= 2 else raw_look
+                if look:
+                    p["dwell"][z["id"]] += dtf
+                    p["sig_sec"][d["sig"]] += dtf
+                    timeline[b][z["id"]] += dtf
+                    if not p["looking"][z["id"]]:
+                        p["episodes"][z["id"]] += 1
+                        p["first_look"].setdefault(z["id"], t)
+                        p["intervals"][z["id"]].append([t, t + dtf])
+                    else:
+                        p["intervals"][z["id"]][-1][1] = t + dtf
+                    if "v" in d:
+                        p["v_look"].append(d["v"])
+                    d["zone"] = z["id"]
+                    # yumuşatma, yönsüz karede de "bakıyor" diyebilir — ısı haritası yön ister
+                    if d["dx"] is not None and (d["dx"] or d["dy"]):
+                        self._heat_add(heat, d, z, W, H)
+                p["looking"][z["id"]] = look
+
     def process_video(self, path, zones, job, cost_map=None, sample_fps=10,
                       max_seconds=None, crowd_mode="auto", demographics=False,
                       face_blur=True):
@@ -573,7 +711,6 @@ class AttentionEngine:
         if z_lines:
             _jlog(job, f"Entrance counting: {len(z_lines)} line(s) active")
         z_shelf = [z for z in zs_att if z["type"] == "shelf"]
-        wrist_samples = 0     # reach sinyal kapsaması (dürüstlük: sinyal yoksa susulur)
         if z_shelf:
             _jlog(job, f"Shelf interaction (reach): {len(z_shelf)} shelf zone(s) active")
         persons = {}
@@ -583,10 +720,16 @@ class AttentionEngine:
         peak = 0
         rays = []               # what-if simülasyonu için kayıtlı bakış ışınları
         sim_frame_saved = False
-        gaze3d_n = 0            # kaç bakış örneği gerçek 3D testten geçti
-        gaze_total = 0
         scene_ok = False        # güven kapısı: 3D yalnızca güvenilirse kararlara girer
         demo_note = None
+        # kare-başı ölçüm çekirdeğinin paylaşılan durumu (canlı modla ortak yol)
+        st = {"persons": persons, "heat": heat, "timeline": timeline,
+              "foot_samples": foot_samples, "rays": rays,
+              "line_counters": line_counters, "z_staff": z_staff,
+              "z_shelf": z_shelf, "zs_att": zs_att, "W": W, "H": H,
+              "scene": None, "scene_ok": False, "zquads": {},
+              "gaze3d_n": 0, "gaze_total": 0, "wrist_samples": 0,
+              "record_rays": True}
         if demographics:        # sınıflandırıcıyı BAŞTA yükle (sessiz gecikme/çökme olmasın)
             try:
                 from server import demographics as demo
@@ -709,125 +852,9 @@ class AttentionEngine:
                 except Exception:
                     scene = None
 
-            # 3D bakış: kafa konumu + dünya-uzayı yön (yalnızca güven kapısı AÇIKKEN)
-            if scene_ok:
-                for d in dets:
-                    if d["dx"] is None or (d["dx"] == 0 and d["dy"] == 0):
-                        continue
-                    bx, by, bw, bh = d["box"]
-                    h3 = scene.head_pos(bx + bw / 2.0, by + float(bh))
-                    if h3 is None:
-                        continue
-                    # sağlama: kafa 3D'si, kişinin gerçek baş pikseline geri düşmeli
-                    pr = scene.project(h3)
-                    if (pr is None or abs(pr[0] - (bx + bw / 2.0)) > bh * 1.2
-                            or abs(pr[1] - by) > bh * 1.2):
-                        d["z_bad"] = True   # 3D konum doğrulanamadı: derinlik bilinmiyor
-                        continue
-                    g3 = scene.gaze_dir3d(d["dx"], d["dy"], d.get("k", self.persp_k), d["sig"])
-                    if g3 is not None:
-                        d["head3"], d["dir3"] = h3, g3
-
-            for d in dets:
-                p = persons.setdefault(d["id"], {
-                    "first_t": t, "frames": 0, "dwell": defaultdict(float),
-                    "episodes": defaultdict(int), "looking": defaultdict(bool),
-                    "hist": defaultdict(lambda: deque(maxlen=self.smooth_n)),
-                    "intervals": defaultdict(list),
-                    "first_look": {}, "pos": None, "v": [], "v_look": [],
-                    "sig_sec": defaultdict(float),
-                })
-                p["frames"] += 1
-                if p["pos"] is not None:
-                    v = math.dist(d["c"], p["pos"]) / dtf / max(d["h"], 1)
-                    p["v"].append(v)
-                    d["v"] = v
-                p["pos"] = d["c"]
-                # scene3d örnekleri + kişinin ortalama ayak noktası
-                bx, by, bw, bh = d["box"]
-                foot = (bx + bw / 2.0, by + float(bh))
-                if (len(foot_samples) < 600 and d.get("fb_ok")
-                        and foot[1] < H - 4 and bh >= 40
-                        and p.get("fs_n", 0) < 15):   # kişi başına ≤15 örnek (denge)
-                    foot_samples.append((foot[0], foot[1], float(bh), d["id"]))
-                    p["fs_n"] = p.get("fs_n", 0) + 1
-                fs = p.setdefault("foot_sum", [0.0, 0.0, 0])
-                fs[0] += foot[0]; fs[1] += foot[1]; fs[2] += 1
-
-                for lc in line_counters:            # giriş-çıkış: ayak noktasıyla
-                    lc.update(d["id"], foot, float(bh), t)
-
-                p["seen_sec"] = p.get("seen_sec", 0.0) + dtf
-                for zst in z_staff:                 # personel alanında geçen süre
-                    if self._pt_in_zone(foot, zst):
-                        p["staff_sec"] = p.get("staff_sec", 0.0) + dtf
-                        break
-
-                if z_shelf:                         # raf-etkileşim: bilek bölgede
-                    wr = d.get("wrists")
-                    if wr:
-                        wrist_samples += 1
-                    runs = p.setdefault("reach_run", {})
-                    act = p.setdefault("reaching", {})
-                    for zsh in z_shelf:
-                        zid_ = zsh["id"]
-                        touching = bool(wr) and any(self._pt_in_zone(w_, zsh) for w_ in wr)
-                        if touching:
-                            runs[zid_] = runs.get(zid_, 0) + 1
-                            # ≥3 ardışık örnek = reach (Spec §2); epizot başına 1 kez
-                            if runs[zid_] >= 3 and not act.get(zid_):
-                                act[zid_] = True
-                                p.setdefault("reach_events", {}) \
-                                 .setdefault(zid_, []).append(round(t, 1))
-                        else:
-                            runs[zid_] = 0
-                            act[zid_] = False
-
-                # bakış ışını kaydı: yön taşıyan her ölçüm (frontal (0,0) hariç)
-                if (d["dx"] is not None and (d["dx"] or d["dy"]) and len(rays) < 80000):
-                    ray = [round(t, 2), d["id"], int(d["c"][0]), int(d["c"][1]),
-                           round(d["dx"], 3), round(d["dy"], 3),
-                           round(d.get("v", 0), 2),
-                           1 if d["sig"] == "body" else 0,
-                           d["k"], d["cone"]]
-                    if "head3" in d:  # 3D alanlar: kafa konumu + dünya yönü
-                        ray += [round(float(v), 2) for v in d["head3"]]
-                        ray += [round(float(v), 3) for v in d["dir3"]]
-                    rays.append(ray)
-
-                for z in zs_att:
-                    q = zquads.get(z["id"])
-                    if "head3" in d and q:   # Faz 2: gerçek 3D ışın-yüzey testi
-                        raw_look = (d["sig"] in ("head", "body")
-                                    and scene.looks_at_3d(d["head3"], d["dir3"], q,
-                                                          d.get("cone", 14.0), d["sig"]))
-                        gaze3d_n += 1
-                    else:                    # sahne yokken 2.5D azimut testi
-                        raw_look = (d["sig"] in ("head", "body")
-                                    and self.looks_at(d, z,
-                                                      tight=d.get("z_bad", False)))
-                    gaze_total += 1
-                    p["hist"][z["id"]].append(raw_look)
-                    hist = p["hist"][z["id"]]
-                    # temporal majority vote — "oyun mantığı": tek karelik titremeyi ele
-                    look = (sum(hist) * 2 > len(hist)) if len(hist) >= 2 else raw_look
-                    if look:
-                        p["dwell"][z["id"]] += dtf
-                        p["sig_sec"][d["sig"]] += dtf
-                        timeline[b][z["id"]] += dtf
-                        if not p["looking"][z["id"]]:
-                            p["episodes"][z["id"]] += 1
-                            p["first_look"].setdefault(z["id"], t)
-                            p["intervals"][z["id"]].append([t, t + dtf])
-                        else:
-                            p["intervals"][z["id"]][-1][1] = t + dtf
-                        if "v" in d:
-                            p["v_look"].append(d["v"])
-                        d["zone"] = z["id"]
-                        # yumuşatma, yönsüz karede de "bakıyor" diyebilir — ısı haritası yön ister
-                        if d["dx"] is not None and (d["dx"] or d["dy"]):
-                            self._heat_add(heat, d, z, W, H)
-                    p["looking"][z["id"]] = look
+            # kare-başı ölçüm çekirdeği (3D bakış + kişi/bölge güncellemeleri)
+            st["scene"], st["scene_ok"], st["zquads"] = scene, scene_ok, zquads
+            self._step_frame(st, dets, t, dtf, b)
 
             if demographics:
                 ok_demo = self._gender_pass(frame, dets, persons)
@@ -900,7 +927,7 @@ class AttentionEngine:
         report["calibration"] = self._cal.state()
         if z_staff:
             report["staff_excluded"] = staff_excluded
-        if z_shelf and wrist_samples == 0:   # dürüstlük: sinyal yoksa 0 basılmaz, söylenir
+        if z_shelf and st["wrist_samples"] == 0:   # dürüstlük: sinyal yoksa 0 basılmaz, söylenir
             report["reach_note"] = ("no reach signal — wrist keypoints were not reliable "
                                     "in this footage (far camera / crowd mode)")
         if line_counters:
@@ -921,8 +948,8 @@ class AttentionEngine:
             report["capture_rate"] = lines_out[0]["capture_rate"] if lines_out else None
         self._attach_scene3d(report, sim_frame_img if sim_frame_img is not None else frame,
                              foot_samples, persons, zs_att, job, prebuilt=scene)
-        if gaze_total and isinstance(report.get("scene3d"), dict):
-            report["scene3d"]["gaze3d_pct"] = round(gaze3d_n / gaze_total * 100, 1)
+        if st["gaze_total"] and isinstance(report.get("scene3d"), dict):
+            report["scene3d"]["gaze3d_pct"] = round(st["gaze3d_n"] / st["gaze_total"] * 100, 1)
         if demographics and persons:
             from server import demographics as demo
             report["audience"] = demo.aggregate(persons, zs, self.min_dwell)

@@ -38,6 +38,7 @@ app = FastAPI(title="Oculiq")
 jobs: dict[str, dict] = {}
 _engine = None
 _engine_lock = threading.Lock()
+_workers: dict[str, "object"] = {}   # camera_id -> StreamWorker (canlı mod)
 
 
 def get_engine():
@@ -321,6 +322,104 @@ async def cancel(job_id: str):
         raise HTTPException(404)
     job["cancel"] = True
     return {"ok": True}
+
+
+# ---------------- live mode (Faz 2): cameras + timeseries ----------------
+@app.get("/api/cameras")
+async def cameras_list():
+    from server import stream
+    cams = stream.load_cameras()
+    for c in cams:
+        w = _workers.get(c["id"])
+        c["status"] = w.status if w and w.is_alive() else "stopped"
+    return cams
+
+
+@app.post("/api/cameras")
+async def cameras_save(payload: dict):
+    """Kamera ekle/güncelle: {id?, name, url, zones, sample_fps?, loop?}"""
+    from server import stream
+    cams = stream.load_cameras()
+    cam_id = payload.get("id") or uuid.uuid4().hex[:8]
+    payload["id"] = cam_id
+    payload.setdefault("zones", [])
+    cams = [c for c in cams if c["id"] != cam_id] + [payload]
+    stream.save_cameras(cams)
+    return {"id": cam_id}
+
+
+@app.delete("/api/cameras/{cam_id}")
+async def cameras_delete(cam_id: str):
+    from server import stream
+    w = _workers.pop(cam_id, None)
+    if w:
+        w.stop()
+    stream.save_cameras([c for c in stream.load_cameras() if c["id"] != cam_id])
+    return {"ok": True}
+
+
+@app.post("/api/cameras/{cam_id}/start")
+async def camera_start(cam_id: str):
+    from server import stream
+    cam = next((c for c in stream.load_cameras() if c["id"] == cam_id), None)
+    if not cam:
+        raise HTTPException(404)
+    if not cam.get("zones"):
+        raise HTTPException(400, "configure zones first")
+    old = _workers.get(cam_id)
+    if old and old.is_alive():
+        return {"ok": True, "status": old.status}
+    w = stream.StreamWorker(get_engine(), cam)
+    _workers[cam_id] = w
+    w.start()
+    return {"ok": True, "status": "starting"}
+
+
+@app.post("/api/cameras/{cam_id}/stop")
+async def camera_stop(cam_id: str):
+    w = _workers.get(cam_id)
+    if w:
+        w.stop()
+    return {"ok": True}
+
+
+@app.get("/api/cameras/{cam_id}/frame")
+async def camera_frame(cam_id: str):
+    """Zone çizimi için tek kare (bellekten ya da kaynaktan; diske yazılmaz)."""
+    import cv2
+    from server import stream
+    w = _workers.get(cam_id)
+    frame = w.last_frame if w and w.last_frame is not None else None
+    if frame is None:
+        cam = next((c for c in stream.load_cameras() if c["id"] == cam_id), None)
+        if not cam:
+            raise HTTPException(404)
+        url = cam["url"]
+        cap = cv2.VideoCapture(int(url) if str(url).isdigit() else url)
+        ok, frame = cap.read()
+        cap.release()
+        if not ok:
+            raise HTTPException(502, "source not reachable")
+    ok, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 82])
+    from fastapi.responses import Response
+    return Response(content=buf.tobytes(), media_type="image/jpeg")
+
+
+@app.get("/api/live/{cam_id}")
+async def live_counters(cam_id: str):
+    w = _workers.get(cam_id)
+    if not w or not w.is_alive():
+        return {"status": "stopped"}
+    out = dict(w.live) if w.live else {}
+    out["status"] = w.status
+    out["error"] = w.error
+    return out
+
+
+@app.get("/api/timeseries")
+async def timeseries(camera: str, zone: str = None, since: int = None, until: int = None):
+    from server import stream
+    return stream.query_timeseries(camera, zone, since, until)
 
 
 @app.middleware("http")

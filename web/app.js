@@ -12,14 +12,15 @@ const state = {
 const COLORS = ["#1d9e75", "#378add", "#d85a30", "#7f77dd", "#ba7517"];
 
 /* ---------- step navigation ---------- */
-const STEPS = ["upload", "zones", "analyze", "report", "history"];
+const STEPS = ["upload", "zones", "analyze", "report", "history", "live"];
+const FLOW = ["upload", "zones", "analyze", "report"];   // sadece akış adımları "done" işaretlenir
 function goto(step) {
   STEPS.forEach((s) => {
     $("step-" + s).classList.toggle("on", s === step);
     const btn = document.querySelector(`.nav-item[data-step="${s}"]`);
     btn.classList.toggle("on", s === step);
-    if (step !== "history" && s !== "history"
-        && STEPS.indexOf(s) < STEPS.indexOf(step)) btn.classList.add("done");
+    if (FLOW.includes(step) && FLOW.includes(s)
+        && FLOW.indexOf(s) < FLOW.indexOf(step)) btn.classList.add("done");
   });
   document.querySelector(`.nav-item[data-step="${step}"]`).disabled = false;
 }
@@ -28,6 +29,7 @@ document.querySelectorAll(".nav-item").forEach((b) =>
     if (b.disabled) return;
     goto(b.dataset.step);
     if (b.dataset.step === "history") showHistory();
+    if (b.dataset.step === "live") showLive();
   }));
 
 /* ---------- settings / gear ---------- */
@@ -1149,3 +1151,200 @@ function toCsv(rep) {
     "stopping_power", "aqs", "cost", "reach_cpm", "attention_cpm"];
   return [cols.join(","), ...rep.zones.map((z) => cols.map((c) => z[c] ?? "").join(","))].join("\n");
 }
+
+/* ================= LIVE (Faz 2): continuous measurement ================= */
+let lvPoll = null, lvCams = [], lvEdit = null;   // lvEdit: {cam, zones, mode, pts}
+
+async function showLive() {
+  await lvRefresh();
+  clearInterval(lvPoll);
+  lvPoll = setInterval(() => {
+    if (!$("step-live").classList.contains("on")) { clearInterval(lvPoll); return; }
+    lvTick();
+  }, 3000);
+}
+
+async function lvRefresh() {
+  lvCams = await (await fetch("/api/cameras")).json();
+  const el = $("liveList");
+  if (!lvCams.length) {
+    el.innerHTML = '<p class="aud-note">No cameras yet. Add an RTSP URL, a webcam index (0), or a file path with "loop" for a fake-live test.</p>';
+    return;
+  }
+  el.innerHTML = lvCams.map((c) => `
+    <div class="cam-card" data-cam="${c.id}">
+      <div class="cam-head">
+        <span class="lv-dot ${c.status === "live" ? "on" : ""}"></span>
+        <b>${esc(c.name || c.id)}</b>
+        <small>${esc(String(c.url))}${c.loop ? " · loop" : ""} · ${(c.zones || []).length} zones</small>
+        <span class="spacer"></span>
+        ${c.status === "live"
+          ? `<button class="sm" data-act="stop">Stop</button>`
+          : `<button class="primary sm" data-act="start" ${!(c.zones || []).length ? "disabled title='draw zones first'" : ""}>Start</button>`}
+        <button class="sm" data-act="zones">Zones</button>
+        <button class="sm" data-act="del" title="remove">×</button>
+      </div>
+      <div class="cam-live" id="lv-${c.id}"><small>${c.status === "live" ? "…" : "stopped"}</small></div>
+      <div class="cam-chart" id="lvc-${c.id}"></div>
+    </div>`).join("");
+  el.querySelectorAll("[data-act]").forEach((b) => b.onclick = () => lvAction(b));
+  lvTick();
+}
+
+async function lvAction(btn) {
+  const id = btn.closest(".cam-card").dataset.cam;
+  const act = btn.dataset.act;
+  if (act === "del") {
+    if (!confirm("Remove this camera? Stored hourly aggregates are kept.")) return;
+    await fetch(`/api/cameras/${id}`, { method: "DELETE" });
+    return lvRefresh();
+  }
+  if (act === "start" || act === "stop") {
+    await fetch(`/api/cameras/${id}/${act}`, { method: "POST" });
+    setTimeout(lvRefresh, 800);
+    return;
+  }
+  if (act === "zones") lvOpenModal(lvCams.find((c) => c.id === id));
+}
+
+async function lvTick() {
+  for (const c of lvCams) {
+    const box = $("lv-" + c.id);
+    if (!box) continue;
+    try {
+      const lv = await (await fetch(`/api/live/${c.id}`)).json();
+      if (lv.status !== "live") {
+        box.innerHTML = `<small>${lv.status || "stopped"}${lv.error ? " · " + esc(lv.error) : ""}</small>`;
+      } else {
+        const zbits = Object.values(lv.zones || {}).map((z) =>
+          `<span class="lv-kpi"><b>${z.lookers}</b> looking · ${fmt(z.att, 0)}s <small>${esc(z.label)}</small></span>`);
+        const lbits = Object.entries(lv.lines || {}).map(([zid, l]) =>
+          `<span class="lv-kpi"><b>${l.in}</b> in · ${l.out} out</span>`);
+        box.innerHTML = `<span class="lv-kpi"><b>${lv.traffic}</b> tracked</span>` + zbits.join("") + lbits.join("");
+      }
+    } catch { box.innerHTML = "<small>unreachable</small>"; }
+    lvChart(c);   // grafik durumdan bağımsız: geçmiş agregatlar her zaman görünür
+  }
+}
+
+async function lvChart(c) {
+  const el = $("lvc-" + c.id);
+  if (!el) return;
+  const since = Math.floor(Date.now() / 1000) - 24 * 3600;
+  const rows = await (await fetch(`/api/timeseries?camera=${c.id}&since=${since}`)).json();
+  const cam = rows.filter((r) => r.zone_id === "_cam");
+  if (!cam.length) { el.innerHTML = ""; return; }
+  const att = {};
+  rows.forEach((r) => { if (r.zone_id !== "_cam") att[r.hour_ts] = (att[r.hour_ts] || 0) + r.attentive_sec; });
+  const maxT = Math.max(1, ...cam.map((r) => r.traffic));
+  const bw = 100 / Math.max(cam.length, 12);
+  const bars = cam.map((r, i) => {
+    const h = r.traffic / maxT * 34;
+    const hh = new Date(r.hour_ts * 1000).getHours();
+    return `<rect x="${i * bw + 0.5}" y="${38 - h}" width="${bw - 1}" height="${h}" rx="0.8" fill="var(--acc, #8fda3c)" opacity=".85"><title>${hh}:00 — ${r.traffic} tracked · ${fmt(att[r.hour_ts] || 0, 0)}s attention · ${r.enters} in</title></rect>`;
+  }).join("");
+  el.innerHTML = `<svg viewBox="0 0 100 40" preserveAspectRatio="none" style="width:100%;height:52px">${bars}</svg>
+    <small class="lv-axis">last 24h · hourly tracked people (hover for detail)</small>`;
+}
+
+/* -- add camera -- */
+$("lvAdd").onclick = async () => {
+  const name = $("lvName").value.trim(), url = $("lvUrl").value.trim();
+  if (!url) return $("lvUrl").focus();
+  await fetch("/api/cameras", { method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ name: name || url, url, loop: $("lvLoop").checked, sample_fps: 5 }) });
+  $("lvName").value = ""; $("lvUrl").value = "";
+  lvRefresh();
+};
+
+/* -- zone drawing modal (surfaces + entrance lines on a captured frame) -- */
+function lvOpenModal(cam) {
+  lvEdit = { cam, zones: JSON.parse(JSON.stringify(cam.zones || [])), mode: null, pts: [] };
+  $("lvmName").textContent = cam.name || cam.id;
+  $("lvmHint").textContent = "loading frame…";
+  $("lvModal").classList.remove("hidden");
+  const img = $("lvmImg");
+  img.onload = () => {
+    const cv = $("lvmCanvas");
+    cv.width = img.naturalWidth; cv.height = img.naturalHeight;
+    $("lvmHint").textContent = "pick a tool, then click on the frame";
+    lvDraw();
+  };
+  img.onerror = () => { $("lvmHint").textContent = "source not reachable — check the URL"; };
+  img.src = `/api/cameras/${cam.id}/frame?ts=${Date.now()}`;
+}
+$("lvmClose").onclick = () => { $("lvModal").classList.add("hidden"); lvEdit = null; };
+$("lvmSurface").onclick = () => { lvEdit.mode = "poly"; lvEdit.pts = []; $("lvmHint").textContent = "click the 4 corners of the surface"; };
+$("lvmLine").onclick = () => { lvEdit.mode = "line"; lvEdit.pts = []; $("lvmHint").textContent = "click 2 points — arrow shows IN; draw in reverse to flip"; };
+
+$("lvmCanvas").addEventListener("pointerdown", (e) => {
+  if (!lvEdit || !lvEdit.mode) return;
+  const r = e.target.getBoundingClientRect();
+  lvEdit.pts.push({ x: (e.clientX - r.left) / r.width, y: (e.clientY - r.top) / r.height });
+  const pts = lvEdit.pts;
+  if (lvEdit.mode === "line" && pts.length === 2) {
+    const [p1, p2] = pts;
+    lvEdit.zones.push({ id: Date.now() % 1e9, label: `Entrance ${lvEdit.zones.filter((z) => z.type === "line").length + 1}`,
+      type: "line", line: [[p1.x, p1.y], [p2.x, p2.y]],
+      x: Math.min(p1.x, p2.x), y: Math.min(p1.y, p2.y),
+      w: Math.abs(p2.x - p1.x) || 0.01, h: Math.abs(p2.y - p1.y) || 0.01 });
+    lvEdit.mode = null; lvEdit.pts = [];
+    $("lvmHint").textContent = "saved locally — Save & start to apply";
+  }
+  if (lvEdit.mode === "poly" && pts.length === 4) {
+    const cx = pts.reduce((s, p) => s + p.x, 0) / 4, cy = pts.reduce((s, p) => s + p.y, 0) / 4;
+    const poly = [...pts].sort((a, b) => Math.atan2(a.y - cy, a.x - cx) - Math.atan2(b.y - cy, b.x - cx));
+    const xs = poly.map((p) => p.x), ys = poly.map((p) => p.y);
+    const type = $("lvmType").value;
+    lvEdit.zones.push({ id: Date.now() % 1e9, label: `${type} ${lvEdit.zones.length + 1}`, type,
+      poly: poly.map((p) => [p.x, p.y]),
+      x: Math.min(...xs), y: Math.min(...ys),
+      w: Math.max(...xs) - Math.min(...xs), h: Math.max(...ys) - Math.min(...ys) });
+    lvEdit.mode = null; lvEdit.pts = [];
+    $("lvmHint").textContent = "saved locally — Save & start to apply";
+  }
+  lvDraw();
+});
+
+function lvDraw() {
+  const cv = $("lvmCanvas"), ctx2 = cv.getContext("2d");
+  const W = cv.width, H = cv.height;
+  ctx2.clearRect(0, 0, W, H);
+  ctx2.font = `600 ${Math.max(13, W / 70)}px sans-serif`;
+  for (const [i, z] of lvEdit.zones.entries()) {
+    const col = COLORS[i % COLORS.length];
+    ctx2.strokeStyle = col; ctx2.fillStyle = col; ctx2.lineWidth = Math.max(2, W / 480);
+    if (z.line) {
+      const [[x1, y1], [x2, y2]] = z.line;
+      ctx2.lineWidth = Math.max(3, W / 320);
+      ctx2.beginPath(); ctx2.moveTo(x1 * W, y1 * H); ctx2.lineTo(x2 * W, y2 * H); ctx2.stroke();
+      const mx = (x1 + x2) / 2 * W, my = (y1 + y2) / 2 * H;
+      const dx = (x2 - x1) * W, dy = (y2 - y1) * H, ll = Math.hypot(dx, dy) || 1;
+      ctx2.beginPath(); ctx2.moveTo(mx, my);
+      ctx2.lineTo(mx - dy / ll * 30, my + dx / ll * 30); ctx2.stroke();
+      ctx2.fillText(`${z.label} (in →)`, mx + 8, my - 8);
+    } else if (z.poly) {
+      ctx2.beginPath();
+      z.poly.forEach(([px, py], j) => j ? ctx2.lineTo(px * W, py * H) : ctx2.moveTo(px * W, py * H));
+      ctx2.closePath();
+      if (z.type === "staff") ctx2.setLineDash([8, 6]);
+      ctx2.stroke(); ctx2.setLineDash([]);
+      ctx2.fillText(z.label, z.x * W + 6, z.y * H - 7);
+    }
+  }
+  if (lvEdit.pts.length) {
+    ctx2.fillStyle = "#fff";
+    for (const p of lvEdit.pts) { ctx2.beginPath(); ctx2.arc(p.x * W, p.y * H, Math.max(4, W / 300), 0, 6.283); ctx2.fill(); }
+  }
+}
+
+$("lvmSave").onclick = async () => {
+  if (!lvEdit) return;
+  const cam = { ...lvEdit.cam, zones: lvEdit.zones };
+  delete cam.status;
+  await fetch("/api/cameras", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(cam) });
+  await fetch(`/api/cameras/${cam.id}/stop`, { method: "POST" });
+  await fetch(`/api/cameras/${cam.id}/start`, { method: "POST" });
+  $("lvModal").classList.add("hidden"); lvEdit = null;
+  setTimeout(lvRefresh, 800);
+};

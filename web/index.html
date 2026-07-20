@@ -50,6 +50,7 @@
       <button class="nav-item" data-step="analyze" disabled><span class="n">3</span>Analyze</button>
       <button class="nav-item" data-step="report" disabled><span class="n">4</span>Report</button>
       <button class="nav-item nav-sep" data-step="history"><span class="n">≡</span>History</button>
+      <button class="nav-item" data-step="live"><span class="n">●</span>Live</button>
     </nav>
     <div class="side-foot">
       <div class="local-badge"><span class="dot-live"></span>100% on-device</div>
@@ -158,8 +159,41 @@
       </header>
       <div id="historyList"></div>
     </section>
+
+    <!-- LIVE (Faz 2): continuous measurement from RTSP/webcam sources -->
+    <section class="step" id="step-live">
+      <header class="step-head compact">
+        <h2>Live measurement</h2>
+        <p>Continuous attention measurement from your cameras. Frames are processed and discarded — nothing is recorded; only hourly aggregates are stored (Spec v1.0 §9).</p>
+      </header>
+      <div class="controls" style="margin-bottom:14px">
+        <input id="lvName" placeholder="Camera name" style="max-width:180px" />
+        <input id="lvUrl" placeholder="rtsp://…  ·  webcam index  ·  file path" style="flex:1" />
+        <label class="chk"><input type="checkbox" id="lvLoop" /> Loop file <small>fake-live test</small></label>
+        <button id="lvAdd" class="primary">+ Add camera</button>
+      </div>
+      <div id="liveList"></div>
+      <div class="zone-modal hidden" id="lvModal">
+        <div class="zone-modal-inner">
+          <div class="controls" style="margin-bottom:8px">
+            <b id="lvmName" style="margin-right:8px"></b>
+            <button id="lvmSurface" class="primary sm">+ Surface</button>
+            <button id="lvmLine" class="sm">+ Entrance line</button>
+            <select id="lvmType" class="sm"><option value="billboard">billboard</option><option value="screen">screen</option><option value="window">window</option><option value="shelf">shelf</option><option value="display">display</option><option value="staff">staff</option></select>
+            <span class="hint" id="lvmHint"></span>
+            <span class="spacer"></span>
+            <button id="lvmSave" class="primary sm">Save & start</button>
+            <button id="lvmClose" class="sm">Close</button>
+          </div>
+          <div style="position:relative">
+            <img id="lvmImg" style="max-width:100%;display:block" />
+            <canvas id="lvmCanvas" style="position:absolute;inset:0;width:100%;height:100%"></canvas>
+          </div>
+        </div>
+      </div>
+    </section>
   </main>
 
-  <script type="module" src="app.js?v=9"></script>
+  <script type="module" src="app.js?v=10"></script>
 </body>
 </html>
