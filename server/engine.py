@@ -960,6 +960,7 @@ class AttentionEngine:
                 {"t": b, "avg": round(s / max(f, 1), 1)} for b, (s, f) in sorted(density.items())]
             report["avg_concurrency"] = round(
                 sum(s for s, _ in density.values()) / max(sum(f for _, f in density.values()), 1), 1)
+        self._record_dataset(persons, zs_att, report, job.get("id", "job"), "batch")
         return report
 
     # ---------- image ----------
@@ -1063,6 +1064,7 @@ class AttentionEngine:
                     job["preview"] = self._jpeg_b64(annotated, 1280)
         except Exception:
             pass
+        self._record_dataset(persons, zs_att, report, job.get("id", "job"), "batch")
         return report
 
     # ---------- audience (opt-in, toplu) ----------
@@ -1327,6 +1329,44 @@ class AttentionEngine:
         if sim is not None:
             report["sim"] = sim
         return json.loads(json.dumps(report, default=lambda o: round(float(o), 3)))
+
+    def _episodes(self, persons, zs_att, report):
+        """Kişi×yüzey dikkat epizotları — kimliksiz, model-hazır (server/dataset.py).
+        Faz 1 kararlarıyla aynı eşik/filtre; yüzey bağlamı rapordan okunur."""
+        zctx = {z["id"]: z for z in report.get("zones", [])}
+        out = []
+        for z in zs_att:
+            zid = z["id"]
+            rz = zctx.get(zid, {})
+            size = rz.get("size_m") or [None, None]
+            for p in persons.values():
+                dw = p["dwell"].get(zid, 0) if hasattr(p["dwell"], "get") else p["dwell"][zid]
+                if dw < self.min_dwell:
+                    continue
+                head = p.get("sig_sec", {}).get("head", 0)
+                body = p.get("sig_sec", {}).get("body", 0)
+                vv = p.get("v") or []
+                out.append({
+                    "zone_type": z["type"],
+                    "dwell": round(float(dw), 2),
+                    "glances": int(p.get("episodes", {}).get(zid, 0)),
+                    "signal": "head" if head >= body else "body",
+                    "approach_speed": round(float(np.mean(vv)), 3) if vv else None,
+                    "reached": bool(p.get("reach_events", {}).get(zid)),
+                    "view_distance_m": rz.get("avg_view_distance_m"),
+                    "zone_w_m": size[0], "zone_h_m": size[1],
+                })
+        return out
+
+    def _record_dataset(self, persons, zs_att, report, source, kind):
+        """Dikkat epizotlarını kalıcı veri setine yaz (hata sessizce yutulur)."""
+        try:
+            from server import dataset
+            eps = self._episodes(persons, zs_att, report)
+            n = dataset.record(source, kind, report.get("spec", "1.0"), eps)
+            report["dataset_episodes"] = n
+        except Exception:
+            pass
 
     def _sig_share(self, persons, zid):
         tot = defaultdict(float)

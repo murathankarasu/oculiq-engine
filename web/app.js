@@ -9,7 +9,8 @@ const state = {
   file: null, isVideo: true, zones: [], nextId: 0,
   jobId: null, es: null,
 };
-const COLORS = ["#1d9e75", "#378add", "#d85a30", "#7f77dd", "#ba7517"];
+const COLORS = ["#ff6b5e", "#4f8a69", "#517a95", "#8c6ca0", "#c08a45"];
+let renderedLogCount = 0;
 
 /* ---------- step navigation ---------- */
 const STEPS = ["upload", "zones", "analyze", "report", "history", "live"];
@@ -312,6 +313,7 @@ async function startAnalysis() {
   goto("analyze");
   $("anSub").textContent = "Loading model on this device… first run downloads nothing, everything is local.";
   $("livePreview").removeAttribute("src");
+  resetPipelineUI();
 
   const fd = new FormData();
   fd.append("file", state.file);
@@ -321,7 +323,6 @@ async function startAnalysis() {
   fd.append("demographics", $("demoMode").checked ? "on" : "off");
   fd.append("face_blur", $("blurMode").checked ? "on" : "off");
 
-  $("procLog").innerHTML = "";
   let res;
   try {
     res = await fetch("/api/analyze", { method: "POST", body: fd });
@@ -347,17 +348,128 @@ async function startAnalysis() {
 
 function setProgress(p) {
   $("pct").textContent = p;
-  const C = 326.7;
-  $("ringFg").style.strokeDashoffset = C - (C * p) / 100;
+  $("progressFill").style.width = `${Math.max(0, Math.min(100, p))}%`;
+  if (p >= 92) setPipelineStage(3, "Building audited report");
+  else if (p > 0) setPipelineStage(2, "Measuring attention signals");
 }
 
 function renderProcLog(log) {
   const el = $("procLog");
   if (!el || !log.length) return;
   const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 30;
-  el.innerHTML = log.map((e) =>
-    `<div class="pl-line pl-${e.lv}"><span class="pl-t">${e.t}</span>${esc(e.m)}</div>`).join("");
+  if (log.length < renderedLogCount) {
+    renderedLogCount = 0;
+    el.innerHTML = "";
+  }
+  if (!renderedLogCount) el.innerHTML = "";
+  el.querySelectorAll(".is-latest").forEach((line) => line.classList.remove("is-latest"));
+
+  const fresh = log.slice(renderedLogCount);
+  const frag = document.createDocumentFragment();
+  fresh.forEach((entry, i) => {
+    const line = document.createElement("div");
+    const level = ["ok", "warn", "err"].includes(entry.lv) ? entry.lv : "info";
+    line.className = `pl-line pl-${level}`;
+    line.style.animationDelay = `${Math.min(i * 45, 180)}ms`;
+    line.innerHTML = `<span class="pl-t">${esc(String(entry.t || "--:--:--"))}</span><span class="pl-msg">${esc(entry.m)}</span>`;
+    frag.appendChild(line);
+  });
+  el.appendChild(frag);
+  const latest = el.lastElementChild;
+  if (latest) latest.classList.add("is-latest");
+  renderedLogCount = log.length;
+  $("logCount").textContent = renderedLogCount;
+
+  const current = log[log.length - 1];
+  const stage = inferPipelineStage(current.m);
+  setPipelineStage(stage.index, stage.label);
+  updateLogNarrative(current, stage);
   if (atBottom) el.scrollTop = el.scrollHeight;
+}
+
+function resetPipelineUI() {
+  renderedLogCount = 0;
+  $("pct").textContent = "0";
+  $("progressFill").style.width = "0%";
+  $("logCount").textContent = "0";
+  $("procLog").innerHTML = '<div class="log-placeholder"><span></span><p>Waiting for the first local event…</p></div>';
+  setPipelineStage(0, "Preparing local engine");
+  const narrative = $("logNarrative");
+  narrative.querySelector(".narrative-icon").textContent = "01";
+  narrative.querySelector("h3").textContent = "Preparing the pipeline";
+  narrative.querySelector("p").textContent = "The engine will explain each step here as your footage is processed.";
+}
+
+function inferPipelineStage(message = "") {
+  const m = message.toLowerCase();
+  if (/report|rendered|done in|saved/.test(m)) return { index: 3, label: "Building audited report" };
+  if (/\d+%|tracked|attention|reconstruct|3d scene|staff exclusion|reach/.test(m)) return { index: 2, label: "Measuring attention signals" };
+  if (/model|yolo|bytetrack|scan mode|video |classif|crowd engine|entrance counting|face blur/.test(m)) return { index: 1, label: "Detecting people and pose" };
+  return { index: 0, label: "Securing local input" };
+}
+
+function setPipelineStage(activeIndex, label) {
+  ["stageIngest", "stageDetect", "stageMeasure", "stageReport"].forEach((id, index) => {
+    const stage = $(id);
+    stage.classList.toggle("active", index === activeIndex);
+    stage.classList.toggle("done", index < activeIndex);
+  });
+  if (label) $("activeStageLabel").textContent = label;
+}
+
+function updateLogNarrative(entry, stage) {
+  const m = (entry.m || "").toLowerCase();
+  let title = ["Input secured", "People and pose detection", "Attention measurement", "Report assembly"][stage.index];
+  let detail = [
+    "The media is registered inside this local job. Nothing is uploaded or shared.",
+    "The engine locates people, assigns stable IDs and reads pose landmarks frame by frame.",
+    "Orientation signals are tested against your marked surfaces and converted into auditable attention events.",
+    "Measured events are being consolidated into metrics, evidence clips and the final report."
+  ][stage.index];
+
+  if (m.includes("loading detection model")) {
+    title = "Loading the vision model";
+    detail = "YOLO11-pose and ByteTrack are starting locally to detect people and keep identities stable across frames.";
+  } else if (m.includes("detection model ready")) {
+    title = "Vision model ready";
+    detail = "Detection is active. The next frames can now be tracked without sending footage off this device.";
+  } else if (m.startsWith("video ")) {
+    title = "Reading the source accurately";
+    detail = "Resolution, duration and real frame timestamps are mapped so sampling remains reliable—even with variable frame rates.";
+  } else if (m.includes("scan mode")) {
+    title = "Choosing the scan strategy";
+    detail = m.includes("tiled")
+      ? "The frame is split into overlapping tiles so smaller or distant people remain detectable in crowded footage."
+      : "A single-pass scan is sufficient for this scene, keeping local processing efficient.";
+  } else if (m.includes("face blurring")) {
+    title = "Privacy layer is active";
+    detail = "Faces are blurred in generated evidence while anonymous pose and orientation signals remain measurable.";
+  } else if (/\d+%/.test(m)) {
+    title = "Following attention over time";
+    detail = "Stable track IDs are accumulating dwell, direction and zone intersections. The live counters update as evidence grows.";
+  } else if (m.includes("reconstructing 3d")) {
+    title = "Reconstructing scene depth";
+    detail = "Perspective cues are being used to understand real spatial placement and improve surface-direction measurements.";
+  } else if (m.includes("annotated video rendered")) {
+    title = "Evidence replay is ready";
+    detail = "The annotated output has been rendered. Oculiq is now turning the event stream into report metrics.";
+  } else if (m.includes("done in")) {
+    title = "Analysis complete";
+    detail = "The local report and its replayable evidence have been saved to this workspace.";
+  } else if (entry.lv === "warn") {
+    title = "Fallback applied safely";
+    detail = "A preferred signal was unavailable, so the engine continued with a supported local fallback and recorded the limitation.";
+  } else if (entry.lv === "err") {
+    title = "Pipeline needs attention";
+    detail = "Processing stopped at this event. The technical message on the left identifies the local cause.";
+  }
+
+  const narrative = $("logNarrative");
+  narrative.querySelector(".narrative-icon").textContent = String(stage.index + 1).padStart(2, "0");
+  narrative.querySelector("h3").textContent = title;
+  narrative.querySelector("p").textContent = detail;
+  narrative.classList.remove("updated");
+  requestAnimationFrame(() => narrative.classList.add("updated"));
 }
 
 function renderLiveCards(live) {
@@ -1155,8 +1267,29 @@ function toCsv(rep) {
 /* ================= LIVE (Faz 2): continuous measurement ================= */
 let lvPoll = null, lvCams = [], lvEdit = null;   // lvEdit: {cam, zones, mode, pts}
 
+async function lvBench() {
+  const el = $("benchPanel");
+  if (!el) return;
+  try {
+    const s = await (await fetch("/api/dataset/stats")).json();
+    if (!s.total_episodes) {
+      el.innerHTML = '<div class="wide-chart"><h4>Attention dataset <span class="new-tag">ASSET</span></h4>' +
+        '<p class="aud-note">No episodes yet. Every analysis (batch + live) adds anonymous attention episodes — the normative benchmark and the seed for the world attention model.</p></div>';
+      return;
+    }
+    const rows = s.by_zone_type.map((z) =>
+      `<tr><td>${esc(z.zone_type)}</td><td>${z.episodes}</td><td>${fmt(z.avg_dwell, 1)}s</td>` +
+      `<td>${z.reach_rate != null ? fmt(z.reach_rate, 0) + "%" : "—"}</td>` +
+      `<td>${z.head_signal_share != null ? fmt(z.head_signal_share, 0) + "%" : "—"}</td></tr>`).join("");
+    el.innerHTML = `<div class="wide-chart"><h4>Attention dataset <span class="new-tag">ASSET</span> — ${s.total_episodes} episodes from ${s.sources} source${s.sources === 1 ? "" : "s"} · schema v${s.schema_version}</h4>
+      <table class="bench-tbl"><thead><tr><th>Surface</th><th>Episodes</th><th>Avg dwell</th><th>Reach</th><th>Head signal</th></tr></thead><tbody>${rows}</tbody></table>
+      <p class="aud-note">Anonymous, aggregate — the normative benchmark (retail moat) and the seed corpus for the cross-environment attention model.</p></div>`;
+  } catch { el.innerHTML = ""; }
+}
+
 async function showLive() {
   await lvRefresh();
+  lvBench();
   clearInterval(lvPoll);
   lvPoll = setInterval(() => {
     if (!$("step-live").classList.contains("on")) { clearInterval(lvPoll); return; }

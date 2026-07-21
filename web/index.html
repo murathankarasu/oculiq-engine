@@ -4,11 +4,8 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Oculiq — Attention Intelligence</title>
-  <link rel="preconnect" href="https://fonts.googleapis.com" />
-  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@200;300;400;500;600;700&display=swap" rel="stylesheet" />
   <link rel="icon" href="data:," />
-  <link rel="stylesheet" href="styles.css?v=5" />
+  <link rel="stylesheet" href="styles.css?v=7" />
 </head>
 <body>
   <div class="orb orb-a"></div>
@@ -43,7 +40,8 @@
   </div>
 
   <aside class="sidebar">
-    <div class="logo"><span class="mark"></span><span class="word">Oculiq</span><span class="beta">beta</span></div>
+    <div class="logo"><span class="brand-orbit" aria-hidden="true"></span><span class="word">Oculiq</span><span class="beta">local</span></div>
+    <div class="workspace-label"><span>Attention engine</span><small>Local workspace</small></div>
     <nav>
       <button class="nav-item on" data-step="upload"><span class="n">1</span>Upload</button>
       <button class="nav-item" data-step="zones" disabled><span class="n">2</span>Surfaces</button>
@@ -53,8 +51,8 @@
       <button class="nav-item" data-step="live"><span class="n">●</span>Live</button>
     </nav>
     <div class="side-foot">
-      <div class="local-badge"><span class="dot-live"></span>100% on-device</div>
-      <p>Footage never leaves this machine. YOLO11-pose · ByteTrack · orientation-based attention.</p>
+      <div class="local-badge"><span class="dot-live"></span>Engine ready</div>
+      <p>Footage stays on this machine. Only anonymous measurements become reports.</p>
     </div>
   </aside>
 
@@ -62,7 +60,8 @@
     <!-- STEP 1: UPLOAD -->
     <section class="step on" id="step-upload">
       <header class="step-head">
-        <h1>Attention <em>Intelligence.</em></h1>
+        <span class="section-kicker">01 / New analysis</span>
+        <h1>Know who <em>actually looked.</em></h1>
         <p>Turn the cameras you already have into audited attention measurement — screens, displays, shelves, windows, entrances. No sensors. No cloud. Every number backed by replayable evidence.</p>
       </header>
       <div class="dropzone" id="dropzone">
@@ -81,6 +80,7 @@
     <!-- STEP 2: ZONES -->
     <section class="step" id="step-zones">
       <header class="step-head compact">
+        <span class="section-kicker">02 / Surface setup</span>
         <h2>Mark your surfaces</h2>
         <p>Click the 4 corners of each surface — screen, display, shelf or window; angled surfaces are captured as their true shape. Add an entrance line to count who walks in (capture rate). One-time setup per fixed camera. Multiple zones unlock A/B comparison.</p>
       </header>
@@ -119,30 +119,64 @@
 
     <!-- STEP 3: ANALYZE -->
     <section class="step" id="step-analyze">
-      <header class="step-head compact">
-        <h2>Analyzing on this device</h2>
-        <p id="anSub">YOLO11-pose x · ByteTrack IDs · orientation cone test — live preview below.</p>
+      <header class="step-head analyze-head">
+        <div>
+          <span class="section-kicker">03 / Processing pipeline</span>
+          <h2>Turning footage into evidence.</h2>
+          <p id="anSub">YOLO11-pose x · ByteTrack IDs · orientation cone test — live preview below.</p>
+        </div>
+        <div class="privacy-seal"><span class="seal-dot"></span><div><b>Local inference</b><small>Footage never leaves this device</small></div></div>
       </header>
       <div class="an-grid">
         <div class="an-preview">
           <img id="livePreview" alt="live preview" />
+          <div class="preview-empty"><span class="preview-eye"></span><p>Vision feed</p><small>Annotated frames will appear here</small></div>
+          <div class="preview-hud"><span><i></i>LIVE ANALYSIS</span><span>ORIENTATION + POSE</span></div>
           <div class="scanline"></div>
         </div>
         <div class="an-side">
-          <div class="ring-wrap">
-            <svg viewBox="0 0 120 120" class="ring">
-              <circle cx="60" cy="60" r="52" class="ring-bg" />
-              <circle cx="60" cy="60" r="52" class="ring-fg" id="ringFg" />
-            </svg>
-            <div class="ring-num"><span id="pct">0</span><small>%</small></div>
+          <div class="progress-card">
+            <div class="progress-top">
+              <span>Analysis progress</span>
+              <b><span id="pct">0</span><small>%</small></b>
+            </div>
+            <div class="progress-track"><span id="progressFill"></span></div>
+            <div class="progress-state"><i></i><span id="activeStageLabel">Preparing local engine</span></div>
           </div>
           <div class="live-cards" id="liveCards"></div>
-          <button id="cancelBtn" class="danger sm">Cancel</button>
+          <div class="signal-card">
+            <span class="signal-glyph" aria-hidden="true">⌁</span>
+            <div><b>Evidence, not estimates</b><small>Every metric remains linked to replayable frames.</small></div>
+          </div>
+          <button id="cancelBtn" class="danger sm cancel-analysis">Cancel analysis</button>
         </div>
       </div>
       <div class="an-log">
-        <div class="an-log-head">Process log</div>
-        <div id="procLog" class="an-log-body"></div>
+        <div class="an-log-head">
+          <div><span class="terminal-lights"><i></i><i></i><i></i></span><b>Evidence pipeline</b></div>
+          <span class="log-live"><i></i>Live · <span id="logCount">0</span> events</span>
+        </div>
+        <div class="pipeline-stages" aria-label="Analysis stages">
+          <div class="pipe-stage active" id="stageIngest"><span>01</span><div><b>Ingest</b><small>Secure local input</small></div></div>
+          <div class="pipe-line"></div>
+          <div class="pipe-stage" id="stageDetect"><span>02</span><div><b>Detect</b><small>People + pose</small></div></div>
+          <div class="pipe-line"></div>
+          <div class="pipe-stage" id="stageMeasure"><span>03</span><div><b>Measure</b><small>Attention signals</small></div></div>
+          <div class="pipe-line"></div>
+          <div class="pipe-stage" id="stageReport"><span>04</span><div><b>Report</b><small>Audited output</small></div></div>
+        </div>
+        <div class="log-layout">
+          <div id="procLog" class="an-log-body" aria-live="polite">
+            <div class="log-placeholder"><span></span><p>Waiting for the first local event…</p></div>
+          </div>
+          <aside class="log-narrative" id="logNarrative">
+            <span class="narrative-label">What is happening?</span>
+            <div class="narrative-icon">01</div>
+            <h3>Preparing the pipeline</h3>
+            <p>The engine will explain each step here as your footage is processed.</p>
+            <small>No footage or identifying image data is sent to the cloud.</small>
+          </aside>
+        </div>
       </div>
     </section>
 
@@ -172,6 +206,7 @@
         <label class="chk"><input type="checkbox" id="lvLoop" /> Loop file <small>fake-live test</small></label>
         <button id="lvAdd" class="primary">+ Add camera</button>
       </div>
+      <div id="benchPanel"></div>
       <div id="liveList"></div>
       <div class="zone-modal hidden" id="lvModal">
         <div class="zone-modal-inner">
@@ -194,6 +229,6 @@
     </section>
   </main>
 
-  <script type="module" src="app.js?v=10"></script>
+  <script type="module" src="app.js?v=12"></script>
 </body>
 </html>

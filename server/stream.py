@@ -173,6 +173,28 @@ class StreamWorker(threading.Thread):
                                  "reaches": 0, "samples": self.win_samples}
         return rows
 
+    def _filtered_persons(self):
+        eng = self.eng
+        persons = {k: v for k, v in self.st["persons"].items()
+                   if v["frames"] >= eng.min_sightings}
+        if self.st["z_staff"]:
+            persons = {k: v for k, v in persons.items()
+                       if not (v.get("staff_sec", 0) >= 60
+                               or v.get("staff_sec", 0) >= 0.3 * max(v.get("seen_sec", 0), 1e-6))}
+        return persons
+
+    def _record_window_dataset(self):
+        """Pencere kapanırken (saat devri / durma) dikkat epizotlarını veri setine yaz.
+        Retail benchmark + model tohumu — kimliksiz (server/dataset.py)."""
+        try:
+            from server import dataset
+            persons = self._filtered_persons()
+            report = {"spec": "1.0", "zones": []}   # canlıda 3D yok: yüzey bağlamı boş
+            eps = self.eng._episodes(persons, self.st["zs_att"], report)
+            dataset.record(self.cam["id"], "live", "1.0", eps)
+        except Exception:
+            pass
+
     def _flush(self, hour_ts):
         rows = self._aggregate()
         con = _db()
@@ -272,11 +294,13 @@ class StreamWorker(threading.Thread):
                 new_hour = int(now // 3600) * 3600
                 if new_hour != cur_hour:              # saat devri: kapat + sıfırla
                     self._flush(cur_hour)
+                    self._record_window_dataset()      # pencere epizotları -> veri seti
                     cur_hour = new_hour
                     self._fresh_window(W, H, zs_att, z_lines, z_staff, z_shelf)
                     prev_t = None
 
             self._flush(cur_hour)
+            self._record_window_dataset()              # kaynak koptu/durdu: son pencere
             cap.release()
             if not loop and not self.stop_flag.is_set():
                 self.status = "reconnecting"

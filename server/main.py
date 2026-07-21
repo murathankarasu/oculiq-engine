@@ -59,6 +59,7 @@ def job_log(job, msg, level="info"):
 def _run(job_id: str, path: Path, zones: list, cost_map: dict, is_video: bool,
          sample_fps: int, crowd_mode: str, demographics: bool, face_blur: bool):
     job = jobs[job_id]
+    job["id"] = job_id
     t_start = time.time()
     try:
         job["status"] = "loading-model"
@@ -421,6 +422,13 @@ async def live_counters(cam_id: str):
 async def timeseries(camera: str, zone: str = None, since: int = None, until: int = None):
     from server import stream
     return stream.query_timeseries(camera, zone, since, until)
+
+
+@app.get("/api/dataset/stats")
+async def dataset_stats():
+    """Birikmiş dikkat-olay veri seti — retail benchmark + model tohumu göstergesi."""
+    from server import dataset
+    return dataset.stats()
 
 
 @app.middleware("http")
