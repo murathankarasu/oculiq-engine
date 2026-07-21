@@ -372,24 +372,78 @@ class AttentionEngine:
             return False
         zc = z["center"]
         zx, zy, zw, zh = z["rect"]
+        r = self._look_ang(det, z, tight)
+        return r is not None and r[0] <= r[1]
+
+    def _look_ang(self, det, z, tight=False):
+        """2.5D azimut testi -> (ang, cone) derece; yön yoksa None.
+        Bölgenin açısal yarı-genişliği koniye eklenir AMA retail yüzeylerinde
+        (shelf/display/window) küçük tutulur: raf hassas hedeftir, ‘kenarına baktın’
+        yakındaki başka ürüne kayar. Billboard/ekran büyük olduğundan geniş kalır."""
+        dx, dy = det["dx"], det["dy"]
+        if dx is None or (dx == 0 and dy == 0):
+            return None
+        zc = z["center"]
+        zx, zy, zw, zh = z["rect"]
         cx, cy = det["c"]
         k = det.get("k", self.persp_k) if det["sig"] == "body" else 1.0
         vx, vy = zc[0] - cx, (zc[1] - cy) / k
         ddx, ddy = dx, dy / k
-
         if self.auto_cone:
-            # bölgenin yatay uçlarına vektörler -> kapsanan açı / 2 (üst sınır 20°)
             v1 = (zx - cx, vy)
             v2 = (zx + zw - cx, vy)
             half = math.degrees(_ang_between(v1, v2)) / 2.0
-            cone = det.get("cone", 20.0) + min(half, 20.0)
+            # retail yüzeyi = dar bonus (8°); geniş reklam yüzeyi = 18°
+            cap = 8.0 if z.get("type") in ("shelf", "display", "window") else 18.0
+            cone = det.get("cone", 20.0) + min(half, cap)
         else:
             cone = self.cone_deg * (0.7 if det["sig"] == "body" else 1.0)
-
         if tight:
             cone *= 0.5   # z doğrulanamıyor: görüntü-düzlemi testine yarım tolerans
         ang = math.degrees(_ang_between((ddx, ddy), (vx, vy)))
-        return ang <= cone
+        return ang, cone
+
+    @staticmethod
+    def _seg_hits_box(x0, y0, x1, y1, bx, by, bw, bh):
+        """[（x0,y0)-(x1,y1)] doğru parçası, kutuyu kesiyor mu (Liang-Barsky)."""
+        dx, dy = x1 - x0, y1 - y0
+        p = [-dx, dx, -dy, dy]
+        q = [x0 - bx, bx + bw - x0, y0 - by, by + bh - y0]
+        u0, u1 = 0.0, 1.0
+        for pi, qi in zip(p, q):
+            if pi == 0:
+                if qi < 0:
+                    return False
+            else:
+                t = qi / pi
+                if pi < 0:
+                    u0 = max(u0, t)
+                else:
+                    u1 = min(u1, t)
+        return u0 <= u1
+
+    def _occluded(self, det, z, dets):
+        """Görüş hattı, bakan kişiyle uzaktaki yüzey ARASINDA duran başka bir
+        kişinin gövdesinden geçiyorsa hedef görünmez -> bakış sayılmaz.
+        2D vekil (sabit kamera): engelleyicinin ayağı bakan kişininkinden YUKARIDA
+        (daha uzak) ama kişi göz->bölge doğrusunun üstünde. Duvara monte yüzeyler
+        bakan kişiden daha uzaktadır; arada duran biri onları kapatır."""
+        ex, ey = det["c"]
+        zx, zy = z["center"]
+        vfoot = det["box"][1] + det["box"][3]
+        vh = max(det["box"][3], 1.0)
+        for o in dets:
+            if o["id"] == det["id"]:
+                continue
+            ox, oy, ow, oh = o["box"]
+            ofoot = oy + oh
+            # engelleyici, bakan kişiden belirgin biçimde daha UZAK (ayağı yukarıda)
+            if ofoot > vfoot - 0.20 * vh:
+                continue
+            # başın olduğu üst gövdeyi hedef al (göz hattı gövdeden geçsin)
+            if self._seg_hits_box(ex, ey, zx, zy, ox, oy + 0.10 * oh, ow, 0.65 * oh):
+                return True
+        return False
 
     # ---------- detection ----------
     def _raw_from_res(self, res, ox=0.0, oy=0.0):
@@ -635,18 +689,40 @@ class AttentionEngine:
                     ray += [round(float(v), 3) for v in d["dir3"]]
                 rays.append(ray)
 
-            for z in zs_att:
-                q = zquads.get(z["id"])
-                if "head3" in d and q:   # gerçek 3D ışın-yüzey testi
-                    raw_look = (d["sig"] in ("head", "body")
-                                and scene.looks_at_3d(d["head3"], d["dir3"], q,
-                                                      d.get("cone", 14.0), d["sig"]))
+            # --- bakış atama: kişi bu karede EN FAZLA BİR yüzeye bakar ---
+            # 3D varsa ışın-yüzey testi (derinlik/occlusion'ı kendi çözer); yoksa
+            # 2.5D winner-take-all: yalnızca en hizalı yüzey + görüş hattı açık olmalı.
+            raw_by_zone = {}
+            has_dir = d["sig"] in ("head", "body")
+            if "head3" in d and any(zquads.get(z["id"]) for z in zs_att):
+                for z in zs_att:
+                    q = zquads.get(z["id"])
+                    ok = bool(q and has_dir
+                              and scene.looks_at_3d(d["head3"], d["dir3"], q,
+                                                    d.get("cone", 14.0), d["sig"]))
+                    # 3D güvenilirken görüş-hattı occlusion'ı (kişi engeli) uygulanır;
+                    # 2.5D'de uygulanmaz — derinlik olmadan yanlış bastırma riski yüksek.
+                    if ok and self._occluded(d, z, dets):
+                        ok = False
+                    raw_by_zone[z["id"]] = ok
                     st["gaze3d_n"] += 1
-                else:                    # sahne yokken 2.5D azimut testi
-                    raw_look = (d["sig"] in ("head", "body")
-                                and self.looks_at(d, z,
-                                                  tight=d.get("z_bad", False)))
-                st["gaze_total"] += 1
+                    st["gaze_total"] += 1
+            else:
+                best_zid, best_ratio = None, 1e9
+                for z in zs_att:
+                    st["gaze_total"] += 1
+                    if not has_dir:
+                        continue
+                    r = self._look_ang(d, z, tight=d.get("z_bad", False))
+                    if r and r[0] <= r[1]:
+                        ratio = r[0] / max(r[1], 1e-6)   # göreli hizalanma (0=tam)
+                        if ratio < best_ratio:
+                            best_ratio, best_zid = ratio, z["id"]
+                for z in zs_att:
+                    raw_by_zone[z["id"]] = (z["id"] == best_zid)
+
+            for z in zs_att:
+                raw_look = raw_by_zone.get(z["id"], False)
                 p["hist"][z["id"]].append(raw_look)
                 hist = p["hist"][z["id"]]
                 # temporal majority vote — "oyun mantığı": tek karelik titremeyi ele
@@ -710,7 +786,7 @@ class AttentionEngine:
                          for z in z_lines]
         if z_lines:
             _jlog(job, f"Entrance counting: {len(z_lines)} line(s) active")
-        z_shelf = [z for z in zs_att if z["type"] == "shelf"]
+        z_shelf = [z for z in zs_att if z["type"] in ("shelf", "display")]
         if z_shelf:
             _jlog(job, f"Shelf interaction (reach): {len(z_shelf)} shelf zone(s) active")
         persons = {}
@@ -1304,9 +1380,13 @@ class AttentionEngine:
                 "timeline": [{"t": b, "sec": round(v.get(zid, 0), 2)}
                              for b, v in sorted(timeline.items())],
             })
-            if z["type"] == "shelf" and not still:
-                # reach: funnel'ın 4. katmanı (geçti→baktı→durdu→uzandı)
-                evs = [(pid_, tt) for pid_, pp in persons.items()
+            if z["type"] in ("shelf", "display") and not still:
+                # reach: funnel'ın 4. katmanı (geçti→baktı→durdu→uzandı).
+                # Uzanma bakmanın ALT KÜMESİDİR: yalnızca yüzeye bakmış (impression
+                # olmuş) kişilerin uzanması sayılır — reach_rate böylece ≤%100 kalır.
+                lookers = {pid_ for pid_, pp in persons.items()
+                           if pp["dwell"][zid] >= self.min_dwell}
+                evs = [(pid_, tt) for pid_, pp in persons.items() if pid_ in lookers
                        for tt in pp.get("reach_events", {}).get(zid, [])]
                 zo = zones_out[-1]
                 zo["reaches"] = len(evs)
