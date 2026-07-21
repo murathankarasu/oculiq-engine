@@ -1421,24 +1421,49 @@ $("lvAdd").onclick = async () => {
 };
 
 /* -- zone drawing modal (surfaces + entrance lines on a captured frame) -- */
+function lvSetMode(mode) {
+  lvEdit.mode = mode; lvEdit.pts = [];
+  $("lvmSurface").classList.toggle("is-on", mode === "poly");
+  $("lvmLine").classList.toggle("is-on", mode === "line");
+  lvHint(mode === "line"
+    ? "click 2 points across the entrance — arrow shows IN (draw in reverse to flip)"
+    : "click the 4 corners of the surface");
+}
+function lvHint(text, warn) {
+  const h = $("lvmHint"); h.textContent = text; h.classList.toggle("warn", !!warn);
+}
+function lvmRenderList() {
+  const ul = $("lvmZoneList");
+  if (!lvEdit.zones.length) { ul.innerHTML = '<li class="empty">None yet — draw one</li>'; return; }
+  ul.innerHTML = lvEdit.zones.map((z, i) =>
+    `<li><span class="zdot" style="background:${COLORS[i % COLORS.length]}"></span>` +
+    `<span class="zl-main"><b>${esc(z.label)}</b><small>${esc(z.type)}</small></span>` +
+    `<button class="rm" data-del="${z.id}" title="remove">×</button></li>`).join("");
+  ul.querySelectorAll("[data-del]").forEach((b) => b.onclick = () => {
+    lvEdit.zones = lvEdit.zones.filter((z) => String(z.id) !== b.dataset.del);
+    lvmRenderList(); lvDraw();
+  });
+}
 function lvOpenModal(cam) {
   lvEdit = { cam, zones: JSON.parse(JSON.stringify(cam.zones || [])), mode: null, pts: [] };
   $("lvmName").textContent = cam.name || cam.id;
-  $("lvmHint").textContent = "loading frame…";
+  $("lvmSurface").classList.remove("is-on"); $("lvmLine").classList.remove("is-on");
+  lvHint("loading frame…");
   $("lvModal").classList.remove("hidden");
+  lvmRenderList();
   const img = $("lvmImg");
   img.onload = () => {
     const cv = $("lvmCanvas");
     cv.width = img.naturalWidth; cv.height = img.naturalHeight;
-    $("lvmHint").textContent = "pick a tool, then click on the frame";
+    lvHint("pick a tool, then click on the frame");
     lvDraw();
   };
-  img.onerror = () => { $("lvmHint").textContent = "source not reachable — check the URL"; };
+  img.onerror = () => { lvHint("source not reachable — check the URL", true); };
   img.src = `/api/cameras/${cam.id}/frame?ts=${Date.now()}`;
 }
 $("lvmClose").onclick = () => { $("lvModal").classList.add("hidden"); lvEdit = null; };
-$("lvmSurface").onclick = () => { lvEdit.mode = "poly"; lvEdit.pts = []; $("lvmHint").textContent = "click the 4 corners of the surface"; };
-$("lvmLine").onclick = () => { lvEdit.mode = "line"; lvEdit.pts = []; $("lvmHint").textContent = "click 2 points — arrow shows IN; draw in reverse to flip"; };
+$("lvmSurface").onclick = () => lvSetMode("poly");
+$("lvmLine").onclick = () => lvSetMode("line");
 
 $("lvmCanvas").addEventListener("pointerdown", (e) => {
   if (!lvEdit || !lvEdit.mode) return;
@@ -1452,7 +1477,9 @@ $("lvmCanvas").addEventListener("pointerdown", (e) => {
       x: Math.min(p1.x, p2.x), y: Math.min(p1.y, p2.y),
       w: Math.abs(p2.x - p1.x) || 0.01, h: Math.abs(p2.y - p1.y) || 0.01 });
     lvEdit.mode = null; lvEdit.pts = [];
-    $("lvmHint").textContent = "saved locally — Save & start to apply";
+    $("lvmLine").classList.remove("is-on");
+    lvHint("saved locally — draw more or Save & start");
+    lvmRenderList();
   }
   if (lvEdit.mode === "poly" && pts.length === 4) {
     const cx = pts.reduce((s, p) => s + p.x, 0) / 4, cy = pts.reduce((s, p) => s + p.y, 0) / 4;
@@ -1464,7 +1491,9 @@ $("lvmCanvas").addEventListener("pointerdown", (e) => {
       x: Math.min(...xs), y: Math.min(...ys),
       w: Math.max(...xs) - Math.min(...xs), h: Math.max(...ys) - Math.min(...ys) });
     lvEdit.mode = null; lvEdit.pts = [];
-    $("lvmHint").textContent = "saved locally — Save & start to apply";
+    $("lvmSurface").classList.remove("is-on");
+    lvHint("saved locally — draw more or Save & start");
+    lvmRenderList();
   }
   lvDraw();
 });
