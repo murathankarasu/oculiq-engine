@@ -112,7 +112,8 @@ class StreamWorker(threading.Thread):
         self.status = "starting"
         self.error = None
         self.live = {}
-        self.last_frame = None       # SADECE bellekte: zone çizimi/önizleme için tek kare
+        self.last_frame = None       # SADECE bellekte: zone çizimi için ham kare (blursuz)
+        self.preview_jpg = None      # canlı izleme: anotasyonlu + yüz-bulanık JPEG (bellekte)
         self.started_ts = time.time()
 
     # -- kaynak --
@@ -237,6 +238,7 @@ class StreamWorker(threading.Thread):
             zs = self.eng._prep_zones(cam["zones"], W, H)
             zs_att, z_lines, z_staff = self.eng._split_zones(zs)
             z_shelf = [z for z in zs_att if z["type"] == "shelf"]
+            self._zs_full = zs        # canlı çizim: tüm zone'lar (yüzey + çizgi + staff)
             self._fresh_window(W, H, zs_att, z_lines, z_staff, z_shelf)
 
             self.status = "live"
@@ -244,6 +246,7 @@ class StreamWorker(threading.Thread):
             cur_hour = int(time.time() // 3600) * 3600
             last_flush = time.time()
             last_sample = 0.0
+            last_preview = 0.0
             prev_t = None
             fi = 0
 
@@ -281,12 +284,27 @@ class StreamWorker(threading.Thread):
                 self.win_samples += 1
                 self.last_frame = frame               # bellekte tek kare; diske yazılmaz
 
-                self.live = self.eng._live(
-                    {k: v for k, v in self.st["persons"].items()
-                     if v["frames"] >= self.eng.min_sightings},
-                    self.st["zs_att"], t, self.line_counters)
+                live_persons = {k: v for k, v in self.st["persons"].items()
+                                if v["frames"] >= self.eng.min_sightings}
+                self.live = self.eng._live(live_persons, self.st["zs_att"], t,
+                                           self.line_counters)
                 self.live["status"] = "live"
                 self.live["hour_ts"] = cur_hour
+
+                # canlı izleme karesi: ~1.2s'de bir anotasyonlu + yüz-bulanık (bellekte)
+                if now - last_preview >= 1.2:
+                    try:
+                        lc = {c.zid: c.counts()[:2] for c in self.line_counters}
+                        annotated = self.eng._draw(
+                            frame, dets, self._zs_full, self.st["heat"], t,
+                            len(live_persons), tiled=False, blur=True, line_counts=lc)
+                        ok2, buf = cv2.imencode(".jpg", annotated,
+                                                [cv2.IMWRITE_JPEG_QUALITY, 72])
+                        if ok2:
+                            self.preview_jpg = buf.tobytes()
+                    except Exception:
+                        pass
+                    last_preview = now
 
                 if now - last_flush >= self.FLUSH_SEC:
                     self._flush(cur_hour)

@@ -407,6 +407,18 @@ async def camera_frame(cam_id: str):
     return Response(content=buf.tobytes(), media_type="image/jpeg")
 
 
+@app.get("/api/cameras/{cam_id}/live_frame")
+async def camera_live_frame(cam_id: str):
+    """Canlı izleme: anotasyonlu + yüz-bulanık son kare (yalnızca bellekten).
+    Kamera çalışmıyorsa ya da henüz kare yoksa 404 — çağıran görüntü gösterir."""
+    from fastapi.responses import Response
+    w = _workers.get(cam_id)
+    if not w or not w.is_alive() or w.preview_jpg is None:
+        raise HTTPException(404, "no live frame — start the camera")
+    return Response(content=w.preview_jpg, media_type="image/jpeg",
+                    headers={"Cache-Control": "no-store"})
+
+
 @app.get("/api/live/{cam_id}")
 async def live_counters(cam_id: str):
     w = _workers.get(cam_id)

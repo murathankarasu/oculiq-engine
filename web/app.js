@@ -1311,9 +1311,10 @@ async function lvRefresh() {
         <b>${esc(c.name || c.id)}</b>
         <small>${esc(String(c.url))}${c.loop ? " · loop" : ""} · ${(c.zones || []).length} zones</small>
         <span class="spacer"></span>
+        <button class="primary sm" data-act="watch">▶ Watch live</button>
         ${c.status === "live"
           ? `<button class="sm" data-act="stop">Stop</button>`
-          : `<button class="primary sm" data-act="start" ${!(c.zones || []).length ? "disabled title='draw zones first'" : ""}>Start</button>`}
+          : `<button class="sm" data-act="start" ${!(c.zones || []).length ? "disabled title='draw zones first'" : ""}>Start</button>`}
         <button class="sm" data-act="zones">Zones</button>
         <button class="sm" data-act="del" title="remove">×</button>
       </div>
@@ -1338,7 +1339,36 @@ async function lvAction(btn) {
     return;
   }
   if (act === "zones") lvOpenModal(lvCams.find((c) => c.id === id));
+  if (act === "watch") lvWatch(lvCams.find((c) => c.id === id));
 }
+
+/* -- live watch modal: annotated + face-blurred frame, ~1s refresh -- */
+let lvWatchTimer = null;
+async function lvWatch(cam) {
+  $("lvwName").textContent = cam.name || cam.id;
+  $("lvwImg").removeAttribute("src");
+  $("lvwHint").textContent = "starting camera…";
+  $("lvWatchModal").classList.remove("hidden");
+  if (cam.status !== "live") {                 // izlemek için kamerayı otomatik başlat
+    await fetch(`/api/cameras/${cam.id}/start`, { method: "POST" });
+    setTimeout(lvRefresh, 1500);
+  }
+  clearInterval(lvWatchTimer);
+  const tick = () => {
+    const img = new Image();
+    const url = `/api/cameras/${cam.id}/live_frame?ts=${Date.now()}`;
+    img.onload = () => { $("lvwImg").src = url; $("lvwHint").textContent = "live · face-blurred · on-device"; };
+    img.onerror = () => { $("lvwHint").textContent = "waiting for first frame…"; };
+    img.src = url;
+  };
+  tick();
+  lvWatchTimer = setInterval(tick, 1000);
+}
+function lvWatchClose() {
+  clearInterval(lvWatchTimer); lvWatchTimer = null;
+  $("lvWatchModal").classList.add("hidden");
+}
+$("lvwClose").onclick = lvWatchClose;
 
 async function lvTick() {
   for (const c of lvCams) {
