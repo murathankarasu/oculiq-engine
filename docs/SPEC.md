@@ -63,6 +63,9 @@ Every measurement carries:
   gaps clamped to [0.01 s, 0.5 s].
 - Detection: YOLO11-pose-x (single pass, `imgsz 960`) or hybrid crowd mode
   (RTMO + 2×2 overlapping tiles, IoS-NMS merge) on ≥1080p or ≥10 people.
+- 3D depth: Depth Anything V2 Metric, **Indoor** variant by default (retail
+  scenes are indoor); `OCULIQ_DEPTH_MODEL=outdoor` for DOOH/open-air. Runs once
+  per job; gated by the reliability check (§3) — falls back to 2.5D if unreliable.
 
 ## 5. Line crossing (entrance counting)
 

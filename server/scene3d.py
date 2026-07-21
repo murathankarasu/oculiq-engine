@@ -27,6 +27,17 @@ MEAN_PERSON_M = 1.70
 _pipe = None
 
 
+# Derinlik modeli — VARSAYILAN İÇ MEKAN (retail sahneleri iç mekan; metrik derinlik
+# domaine duyarlı). DOOH/açık hava için OCULIQ_DEPTH_MODEL env ile Outdoor'a alınabilir.
+# Model değişikliği ölçümü etkiler → docs/SPEC.md ve tools/regress.py kapsamında.
+_DEPTH_MODELS = {
+    "indoor":  "depth-anything/Depth-Anything-V2-Metric-Indoor-Small-hf",
+    "outdoor": "depth-anything/Depth-Anything-V2-Metric-Outdoor-Small-hf",
+}
+DEPTH_MODEL = _DEPTH_MODELS.get(
+    os.environ.get("OCULIQ_DEPTH_MODEL", "indoor").lower(), _DEPTH_MODELS["indoor"])
+
+
 def _depth_pipe():
     global _pipe
     if _pipe is None:
@@ -37,9 +48,7 @@ def _depth_pipe():
                      (0 if torch.cuda.is_available() else -1)
         except Exception:
             device = -1
-        _pipe = pipeline("depth-estimation",
-                         model="depth-anything/Depth-Anything-V2-Metric-Outdoor-Small-hf",
-                         device=device)
+        _pipe = pipeline("depth-estimation", model=DEPTH_MODEL, device=device)
     return _pipe
 
 
