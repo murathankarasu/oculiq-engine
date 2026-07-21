@@ -146,15 +146,9 @@ class StreamWorker(threading.Thread):
 
     def _aggregate(self):
         """Pencere durumundan (persons + sayaçlar) agregat satırları üret.
-        Ghost + staff filtreleri Spec v1.0 ile aynı."""
+        Dikiş + ghost + staff filtreleri Spec v1.0 / batch ile aynı."""
         eng = self.eng
-        persons = {k: v for k, v in self.st["persons"].items()
-                   if v["frames"] >= eng.min_sightings}
-        if self.st["z_staff"]:
-            persons = {k: v for k, v in persons.items()
-                       if not (v.get("staff_sec", 0) >= 60
-                               or v.get("staff_sec", 0) >= 0.3 * max(v.get("seen_sec", 0), 1e-6))}
-        valid = set(persons)
+        persons, valid = self._filtered_persons()
         rows = {"_cam": {"traffic": len(persons), "impressions": 0, "attentive_sec": 0.0,
                          "enters": 0, "exits": 0, "reaches": 0, "samples": self.win_samples}}
         for z in self.st["zs_att"]:
@@ -175,21 +169,26 @@ class StreamWorker(threading.Thread):
         return rows
 
     def _filtered_persons(self):
+        """Batch ile aynı boru: dikiş -> ghost filtresi -> personel hariç tutma.
+        -> (persons, valid_pids)  — valid_pids çizgi geçişleri için (dikilen
+        eski parça pid'leri de kalıcı kimliğe sayılır)."""
         eng = self.eng
-        persons = {k: v for k, v in self.st["persons"].items()
+        persons, aliases = eng._stitch_tracks(dict(self.st["persons"]))
+        persons = {k: v for k, v in persons.items()
                    if v["frames"] >= eng.min_sightings}
         if self.st["z_staff"]:
             persons = {k: v for k, v in persons.items()
                        if not (v.get("staff_sec", 0) >= 60
                                or v.get("staff_sec", 0) >= 0.3 * max(v.get("seen_sec", 0), 1e-6))}
-        return persons
+        valid = set(persons) | {a for a, c in aliases.items() if c in persons}
+        return persons, valid
 
     def _record_window_dataset(self):
         """Pencere kapanırken (saat devri / durma) dikkat epizotlarını veri setine yaz.
         Retail benchmark + model tohumu — kimliksiz (server/dataset.py)."""
         try:
             from server import dataset
-            persons = self._filtered_persons()
+            persons, _ = self._filtered_persons()
             report = {"spec": "1.0", "zones": []}   # canlıda 3D yok: yüzey bağlamı boş
             eps = self.eng._episodes(persons, self.st["zs_att"], report)
             dataset.record(self.cam["id"], "live", "1.0", eps)

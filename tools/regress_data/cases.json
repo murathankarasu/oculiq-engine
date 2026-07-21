@@ -18,7 +18,34 @@
       "zones.0.reaches": [2, 8],
       "zones.0.reachers": [2, 5],
       "lines.0.enters": [1, 2],
-      "lines.0.exits": [0, 1]
+      "lines.0.exits": [0, 1],
+      "measurement_health.direction_share": [85, 100],
+      "measurement_health.tracks_seen": [8, 14],
+      "measurement_health.ghosts_dropped": [0, 4]
+    }
+  },
+  {
+    "name": "widestore-wall-shelf",
+    "clip": "widestore.mp4",
+    "zones": [
+      {"id": 0, "label": "Wall shelf", "type": "shelf",
+       "x": 0.2884973826142132, "y": 0.10941906373378454,
+       "w": 0.16088495399746195, "h": 0.5292847574732093,
+       "poly": [[0.2884973826142132, 0.11255640157924422],
+                [0.43760410057106597, 0.10941906373378454],
+                [0.44938233661167515, 0.5569832205301748],
+                [0.3121629124365482, 0.6387038212069938]]}
+    ],
+    "sample_fps": 10,
+    "expect": {
+      "traffic": [14, 22],
+      "zones.0.impressions": [3, 8],
+      "zones.0.attention_rate": [18, 40],
+      "zones.0.reaches": [3, 9],
+      "zones.0.reachers": [2, 6],
+      "measurement_health.direction_share": [80, 100],
+      "measurement_health.tracks_stitched": [6, 18],
+      "measurement_health.gaze3d_pct": [50, 90]
     }
   }
 ]

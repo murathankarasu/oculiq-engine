@@ -83,14 +83,24 @@ class SceneModel:
     def _build(self, frame_bgr, person_samples):
         from PIL import Image
         import cv2
-        self.H, self.W = frame_bgr.shape[:2]
+        # Çoklu-kare medyan derinlik: liste verilirse (≤3 kare) her karenin
+        # derinliği hesaplanır ve PİKSEL BAZINDA MEDYAN alınır — önden geçen
+        # kişi/geçici engel tek karenin haritasını bozar, medyanı bozamaz.
+        frames = frame_bgr if isinstance(frame_bgr, list) else [frame_bgr]
+        frames = [f for f in frames if f is not None][:3] or [frame_bgr]
+        self.H, self.W = frames[0].shape[:2]
         self.cx, self.cy = self.W / 2.0, self.H / 2.0
 
-        img = Image.fromarray(cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB))
-        out = _depth_pipe()(img)
-        d = np.asarray(out["predicted_depth"], dtype=np.float32)
-        if d.shape != (self.H, self.W):
-            d = cv2.resize(d, (self.W, self.H), interpolation=cv2.INTER_LINEAR)
+        maps = []
+        for fb in frames:
+            img = Image.fromarray(cv2.cvtColor(fb, cv2.COLOR_BGR2RGB))
+            out = _depth_pipe()(img)
+            di = np.asarray(out["predicted_depth"], dtype=np.float32)
+            if di.shape != (self.H, self.W):
+                di = cv2.resize(di, (self.W, self.H), interpolation=cv2.INTER_LINEAR)
+            maps.append(di)
+        d = maps[0] if len(maps) == 1 else np.median(np.stack(maps), axis=0).astype(np.float32)
+        self.depth_frames_used = len(maps)
         self.depth = d
 
         # --- KALIBRASYON: ayak-ZEMIN derinligi + kisi-basina medyan boy + iterasyon ---

@@ -551,6 +551,20 @@ function renderReport(rep, jobId) {
   if (rep.lines_note) {
     html += `<div class="wide-chart"><h4>Entrance counting</h4><p class="aud-note">${esc(rep.lines_note)}</p></div>`;
   }
+
+  if (rep.measurement_health) {
+    const h = rep.measurement_health, sm = h.signal_mix || {};
+    const chip = (k, v, warn) =>
+      `<span class="lv-kpi" ${warn ? 'style="color:var(--danger)"' : ""}><b>${v}</b> <small>${k}</small></span>`;
+    html += `<div class="wide-chart"><h4>Measurement health <span class="new-tag">TRANSPARENCY</span> — a weak scene is disclosed, never hidden (Spec §10)</h4>
+      <div class="cam-live" style="margin-top:4px">
+        ${chip("direction signal", fmt(h.direction_share, 0) + "%", h.direction_share < 60)}
+        ${chip("head / body / away", `${fmt(sm.head, 0)} / ${fmt(sm.body, 0)} / ${fmt(sm.away, 0)}%`, (sm.away || 0) > 30)}
+        ${chip("detector confidence", fmt(h.avg_det_conf, 2), h.avg_det_conf < 0.4)}
+        ${chip("tracks", `${h.tracks_seen} seen · ${h.tracks_stitched} stitched · ${h.ghosts_dropped} ghosts`, false)}
+        ${chip("3D gaze path", fmt(h.gaze3d_pct, 0) + "%", false)}
+      </div></div>`;
+  }
   if (rep.reach_note) {
     html += `<div class="wide-chart"><h4>Shelf interaction</h4><p class="aud-note">${esc(rep.reach_note)}</p></div>`;
   }

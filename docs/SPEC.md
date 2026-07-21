@@ -31,8 +31,8 @@ Every measurement carries:
 
 | Term | Definition |
 |---|---|
-| **Person / traffic** | A tracked identity seen in ≥ 3 sampled frames (`min_sightings = 3`). Single-frame ghosts never count. |
-| **Look (raw)** | Head direction intersects the surface under the attention-cone test, signal ∈ {head, body}. |
+| **Person / traffic** | A tracked identity seen in ≥ 3 sampled frames (`min_sightings = 3`). Single-frame ghosts never count. Track fragments are **stitched**: a track reappearing within 1.5 s at the same spot with similar height (±33%) rejoins its predecessor — continuity repair, not identification. |
+| **Look (raw)** | Head direction intersects the surface under the attention-cone test, signal ∈ {head, body}. The direction vector is temporally smoothed per person (EMA, 0.6 new / 0.4 previous); no direction is ever fabricated when the signal is absent. A person looks at **at most one surface per sample** (best-aligned wins). |
 | **Look (smoothed)** | Temporal majority vote over the last 3 samples (`smooth_n = 3`) — single-frame flicker is discarded. |
 | **Impression** | A person whose cumulative dwell on a surface ≥ **0.4 s** (`min_dwell`). |
 | **Attentive second** | One second of smoothed looking time, accumulated with real frame timestamps (VFR-safe). |
@@ -64,8 +64,11 @@ Every measurement carries:
 - Detection: YOLO11-pose-x (single pass, `imgsz 960`) or hybrid crowd mode
   (RTMO + 2×2 overlapping tiles, IoS-NMS merge) on ≥1080p or ≥10 people.
 - 3D depth: Depth Anything V2 Metric, **Indoor** variant by default (retail
-  scenes are indoor); `OCULIQ_DEPTH_MODEL=outdoor` for DOOH/open-air. Runs once
-  per job; gated by the reliability check (§3) — falls back to 2.5D if unreliable.
+  scenes are indoor); `OCULIQ_DEPTH_MODEL=outdoor` for DOOH/open-air. Built once
+  per job from the **per-pixel median of up to 3 frames** (~0.8 s apart) so a
+  passer-by can't poison the calibration; gated by the reliability check (§3) —
+  falls back to 2.5D if unreliable. When 3D is reliable, a look is dropped if a
+  nearer person's body blocks the line of sight (occlusion test; 3D-gated only).
 
 ## 5. Line crossing (entrance counting)
 
@@ -111,6 +114,9 @@ Audience estimates (if enabled) are aggregate-only with k-anonymity (k ≥ 5).
 
 1. Numbers below reliability thresholds are withheld, not extrapolated.
 2. Signal mix and confidence intervals are always reported.
+2b. Every report carries **measurement-health telemetry** (direction share,
+   signal mix, detector confidence, tracks seen/stitched, ghosts dropped,
+   3D-path share) — a weak scene is disclosed, never hidden.
 3. Simulated (what-if) figures are never mixed with measured figures.
 4. The published error margins (docs/ACCURACY.md) travel with every audit
    report referencing this spec version.

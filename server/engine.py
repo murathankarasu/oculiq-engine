@@ -602,6 +602,32 @@ class AttentionEngine:
         scene, scene_ok, zquads = st["scene"], st["scene_ok"], st["zquads"]
         W, H = st["W"], st["H"]
 
+        # --- ölçüm sağlığı sayaçları + yön yumuşatma (EMA) ---
+        # Telemetri: sinyal karışımı / yön oranı / tespit güveni — zayıf sahne
+        # rapordan okunur (yanlış sayı basmak yerine sağlığı göstermek, Spec §10).
+        # EMA: kişi başına yön vektörüne hafif üstel yumuşatma (0.6 yeni / 0.4 eski)
+        # — kare gürültüsünden doğan sahte glance/dwell parçalanmasını azaltır.
+        # Sinyal yokken yön UYDURULMAZ (None kalır) — dürüstlük ilkesi.
+        mh = st.setdefault("mh", {"det": 0, "dir": 0, "conf_sum": 0.0,
+                                  "sig": {"head": 0, "body": 0, "away": 0}})
+        ema = st.setdefault("dir_ema", {})
+        for d in dets:
+            mh["det"] += 1
+            sg = d.get("sig", "away")
+            mh["sig"][sg] = mh["sig"].get(sg, 0) + 1
+            mh["conf_sum"] += float(d.get("conf", 0.0))
+            if d["dx"] is None or (d["dx"] == 0 and d["dy"] == 0):
+                continue
+            mh["dir"] += 1
+            prev = ema.get(d["id"])
+            if prev is not None:
+                sx = 0.6 * d["dx"] + 0.4 * prev[0]
+                sy = 0.6 * d["dy"] + 0.4 * prev[1]
+                nrm = math.hypot(sx, sy)
+                if nrm > 1e-6:
+                    d["dx"], d["dy"] = sx / nrm, sy / nrm
+            ema[d["id"]] = (d["dx"], d["dy"])
+
         # 3D bakış: kafa konumu + dünya-uzayı yön (yalnızca güven kapısı AÇIKKEN)
         if scene_ok:
             for d in dets:
@@ -646,6 +672,11 @@ class AttentionEngine:
                 p["fs_n"] = p.get("fs_n", 0) + 1
             fs = p.setdefault("foot_sum", [0.0, 0.0, 0])
             fs[0] += foot[0]; fs[1] += foot[1]; fs[2] += 1
+            # track dikişi (re-ID stitching) için uç bilgiler
+            p["last_t"] = t
+            p.setdefault("first_pos", d["c"])
+            p["last_pos"] = d["c"]
+            p["h_sum"] = p.get("h_sum", 0.0) + max(float(d["h"]), 1.0)
 
             for lc in line_counters:            # giriş-çıkış: ayak noktasıyla
                 lc.update(d["id"], foot, float(bh), t)
@@ -796,6 +827,8 @@ class AttentionEngine:
         peak = 0
         rays = []               # what-if simülasyonu için kayıtlı bakış ışınları
         sim_frame_saved = False
+        depth_frames = []       # çoklu-kare derinlik tamponu (≤3 kare, medyan)
+        depth_last_t = 0.0
         scene_ok = False        # güven kapısı: 3D yalnızca güvenilirse kararlara girer
         demo_note = None
         # kare-başı ölçüm çekirdeğinin paylaşılan durumu (canlı modla ortak yol)
@@ -886,6 +919,14 @@ class AttentionEngine:
                 job["sim_frame"] = str(sf)
                 sim_frame_img = frame.copy()
                 sim_frame_saved = True
+                depth_frames = [sim_frame_img]      # çoklu-kare derinlik tamponu
+                depth_last_t = t
+
+            # derinlik tamponu: ~0.8 sn arayla 3 kare (medyan, geçici engellere karşı)
+            if (sim_frame_saved and scene is None and len(depth_frames) < 3
+                    and t - depth_last_t >= 0.8):
+                depth_frames.append(frame.copy())
+                depth_last_t = t
 
             # 3D sahneyi canlı kur: yeterli insan örneği birikince (bir kez).
             # NOT: bölge testlerinden ÖNCE — bu karenin kararları 3D geometriyle verilsin.
@@ -893,8 +934,9 @@ class AttentionEngine:
                 try:
                     from server.scene3d import SceneModel
                     job["status"] = "scene-3d"
-                    _jlog(job, "Reconstructing 3D scene (metric depth model)…")
-                    scene = SceneModel().build(sim_frame_img, foot_samples)
+                    _jlog(job, f"Reconstructing 3D scene (metric depth, "
+                               f"{len(depth_frames)}-frame median)…")
+                    scene = SceneModel().build(depth_frames, foot_samples)
                     scene_ok = scene.reliable()   # GÜVEN KAPISI: düşükse 3D devre dışı
                     if scene.enabled:
                         hm = scene.height_mean
@@ -969,8 +1011,15 @@ class AttentionEngine:
             cv2.imwrite(str(sf), frame if frame is not None else np.zeros((H, W, 3), np.uint8))
             job["sim_frame"] = str(sf)
 
+        # track dikişi: kopan kimlikleri birleştir (traffic şişmesini onarır)
+        tracks_seen = len(persons)
+        persons, aliases = self._stitch_tracks(persons)
+        if aliases:
+            _jlog(job, f"Track stitching: {len(aliases)} fragment(s) re-joined")
         # stability filter: ghosts seen in a single sampled frame don't count
+        pre_ghost = len(persons)
         persons = {k: v for k, v in persons.items() if v["frames"] >= self.min_sightings}
+        ghosts_dropped = pre_ghost - len(persons)
         # personel hariç tutma (Spec v1.0 §8): görünür sürenin ≥%30'u veya ≥60s
         # personel alanında geçen ID'ler TÜM metriklerden düşülür — şeffafça raporlanır
         staff_excluded = 0
@@ -982,7 +1031,11 @@ class AttentionEngine:
             persons = {k: v for k, v in persons.items() if k not in staff_ids}
             if staff_excluded:
                 _jlog(job, f"Staff exclusion: {staff_excluded} person(s) removed from all metrics")
+        for r in rays:                               # dikilen parçaların ışınları kalıcı pid'e
+            r[1] = aliases.get(r[1], r[1])
         rays = [r for r in rays if r[1] in persons]  # hayaletlerin ışınları da elenir
+        # çizgi geçişleri: kalıcı pid'ler + onlara dikilen eski parçalar geçerli
+        valid_pids = set(persons) | {a for a, c in aliases.items() if c in persons}
         sim = {"w": W, "h": H, "dt": round(dt, 4), "cone_deg": self.cone_deg,
                "min_dwell": self.min_dwell, "k": self.persp_k, "auto_cone": self.auto_cone,
                "persons": {str(k): round(v["first_t"], 2) for k, v in persons.items()},
@@ -1010,7 +1063,7 @@ class AttentionEngine:
             traffic_n = len(persons)
             lines_out = []
             for z, lc in zip(z_lines, line_counters):
-                ins, outs, ev = lc.counts(set(persons.keys()))
+                ins, outs, ev = lc.counts(valid_pids)
                 lo, hi = _wilson(min(ins, traffic_n), traffic_n)
                 lines_out.append({
                     "id": z["id"], "label": z["label"],
@@ -1026,6 +1079,20 @@ class AttentionEngine:
                              foot_samples, persons, zs_att, job, prebuilt=scene)
         if st["gaze_total"] and isinstance(report.get("scene3d"), dict):
             report["scene3d"]["gaze3d_pct"] = round(st["gaze3d_n"] / st["gaze_total"] * 100, 1)
+        # ölçüm sağlığı (Spec §10): zayıf sahne gizlenmez, raporlanır
+        mh = st.get("mh", {})
+        det_n = max(mh.get("det", 0), 1)
+        report["measurement_health"] = {
+            "detections": mh.get("det", 0),
+            "direction_share": round(mh.get("dir", 0) / det_n * 100, 1),
+            "signal_mix": {k: round(v / det_n * 100, 1)
+                           for k, v in mh.get("sig", {}).items()},
+            "avg_det_conf": round(mh.get("conf_sum", 0.0) / det_n, 2),
+            "tracks_seen": tracks_seen,
+            "tracks_stitched": len(aliases),
+            "ghosts_dropped": ghosts_dropped,
+            "gaze3d_pct": (report.get("scene3d") or {}).get("gaze3d_pct", 0.0),
+        }
         if demographics and persons:
             from server import demographics as demo
             report["audience"] = demo.aggregate(persons, zs, self.min_dwell)
@@ -1278,6 +1345,63 @@ class AttentionEngine:
                 inside = not inside
             j = i
         return inside
+
+    @staticmethod
+    def _merge_person(dst, src):
+        """src track parçasını dst'ye kat (dikiş) — tüm birikimler toplanır."""
+        dst["frames"] += src["frames"]
+        for zid, v in src["dwell"].items():
+            dst["dwell"][zid] += v
+        for zid, v in src["episodes"].items():
+            dst["episodes"][zid] += v
+        for zid, iv in src.get("intervals", {}).items():
+            dst["intervals"][zid].extend(iv)
+        for zid, tt in src.get("first_look", {}).items():
+            dst["first_look"][zid] = min(dst["first_look"].get(zid, tt), tt)
+        dst["v"].extend(src.get("v", []))
+        dst["v_look"].extend(src.get("v_look", []))
+        for k2, v in src.get("sig_sec", {}).items():
+            dst["sig_sec"][k2] += v
+        for zid, evs in src.get("reach_events", {}).items():
+            dst.setdefault("reach_events", {}).setdefault(zid, []).extend(evs)
+        for key in ("seen_sec", "staff_sec", "h_sum"):
+            dst[key] = dst.get(key, 0.0) + src.get(key, 0.0)
+        fs, fs2 = dst.get("foot_sum"), src.get("foot_sum")
+        if fs and fs2:
+            fs[0] += fs2[0]; fs[1] += fs2[1]; fs[2] += fs2[2]
+        dst["last_t"] = max(dst.get("last_t", 0), src.get("last_t", 0))
+        if src.get("last_pos") is not None:
+            dst["last_pos"] = src["last_pos"]
+
+    def _stitch_tracks(self, persons, max_gap=1.5):
+        """Re-ID dikişi: kısa kesintiyle (≤max_gap sn) aynı yerde, benzer boyla
+        yeniden doğan track'i öncekine birleştir. Kimliklendirme değil süreklilik
+        onarımı — şişen traffic'i (oranların paydası!) ve bölünmüş dwell'i azaltır.
+        -> (persons, alias) ; alias: eski_pid -> kalıcı_pid (düz harita)."""
+        items = sorted(persons.items(), key=lambda kv: kv[1].get("first_t", 0.0))
+        alias = {}
+        for pid, p in items:
+            if pid in alias or p.get("first_pos") is None:
+                continue
+            best = None
+            for qid, q in items:
+                if qid == pid or qid in alias or q.get("last_pos") is None:
+                    continue
+                gap = p.get("first_t", 0.0) - q.get("last_t", -1e18)
+                if not (0.0 < gap <= max_gap):
+                    continue
+                qh = q.get("h_sum", 0.0) / max(q.get("frames", 1), 1)
+                ph = p.get("h_sum", 0.0) / max(p.get("frames", 1), 1)
+                if qh <= 0 or ph <= 0 or not (0.75 <= ph / qh <= 1.33):
+                    continue
+                if math.dist(q["last_pos"], p["first_pos"]) > 0.9 * max(qh, ph):
+                    continue
+                if best is None or q["last_t"] > best[1]["last_t"]:
+                    best = (qid, q)
+            if best is not None:
+                self._merge_person(best[1], p)
+                alias[pid] = best[0]
+        return {k: v for k, v in persons.items() if k not in alias}, alias
 
     @staticmethod
     def _split_zones(zs):
