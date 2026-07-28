@@ -364,7 +364,10 @@ class SceneModel:
             nrm = nv
         return {"corners": cns, "center": center, "normal": nrm, "tilt_deg": tilt,
                 "w_m": round(wm, 2), "h_m": round(hm, 2),
-                "depth_m": round(float(center[2]), 1)}
+                "depth_m": round(float(center[2]), 1),
+                # olcunun NEREDEN geldigi rapora tasinir: derinlik haritasindan mi,
+                # yoksa (harita guvenilmezken) dogrulanmis zemin duzleminden mi
+                "depth_source": getattr(self, "zone_depth_source", "depth-map")}
 
     def zone_mesh(self, quad, nu=6, nv=4):
         """Yüzeye oturan 3D tel-kafes + normal oku (görsel kanıt katmanı)."""

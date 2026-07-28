@@ -116,7 +116,11 @@ Audience estimates (if enabled) are aggregate-only with k-anonymity (k ≥ 5).
 
 ## 10. Honesty rules
 
-1. Numbers below reliability thresholds are withheld, not extrapolated.
+1. Numbers below reliability thresholds are withheld, not extrapolated — e.g. a
+   reconstructed surface size outside 0.15–20 m is suppressed with a stated
+   reason instead of being reported. Where a 3D measurement is derived from the
+   calibrated ground plane rather than the depth map, the report says so
+   (`size_source: ground-anchored`).
 2. Signal mix and confidence intervals are always reported.
 2b. Every report carries **measurement-health telemetry** (direction share,
    signal mix, detector confidence, tracks seen/stitched, ghosts dropped,

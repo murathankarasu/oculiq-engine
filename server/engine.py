@@ -1283,7 +1283,17 @@ class AttentionEngine:
                 q = sm.zone_quad(z)
                 if not q:
                     continue
-                zr["size_m"] = [q["w_m"], q["h_m"]]
+                # Boyut saglamasi (Spec §10 kural 1): retail yuzeyi icin fiziksel
+                # olarak makul olmayan olcu YAYINLANMAZ — uydurmak yerine susulur
+                # ve nedeni raporlanir. Yanlis "4x5m raf" gibi degerler musteri
+                # nezdinde tum raporu supheli hale getiriyordu.
+                wq, hq = float(q["w_m"]), float(q["h_m"])
+                if 0.15 <= wq <= 20.0 and 0.15 <= hq <= 20.0:
+                    zr["size_m"] = [q["w_m"], q["h_m"]]
+                    zr["size_source"] = q.get("depth_source", "depth-map")
+                else:
+                    zr["size_note"] = (f"surface size withheld — implausible "
+                                       f"({wq:.1f}x{hq:.1f} m); depth unreliable here")
                 zr["zone_depth_m"] = q["depth_m"]
                 if q.get("tilt_deg") is not None:
                     zr["surface_tilt_deg"] = q["tilt_deg"]
