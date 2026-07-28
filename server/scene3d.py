@@ -499,6 +499,10 @@ class SceneModel:
             return False
         A = np.asarray(A, dtype=float)
         B = np.asarray(B, dtype=float)
+        za, zb = float(A[2]), float(B[2])
+        if abs(zb - za) < 0.4:        # yuzeyin hemen onunde: engel olacak yer yok
+            return False
+        hits = 0
         for i in range(2, samples - 2):          # bas ve son parcalari atla
             P = A + (B - A) * (i / float(samples))
             q = self.project(P)
@@ -510,8 +514,16 @@ class SceneModel:
             Zs = float(self.depth[v, u])
             if not (0.3 < Zs < 300):
                 continue
+            # BAKANIN KENDI GOVDESI engel degildir: sahne yuzeyi kisinin kendi
+            # derinligindeyse (ya da hedefin derinligindeyse) atlanir. Bu kontrol
+            # olmadan raf onunde duran kisi kendi vucudunu engel sayip
+            # "bakmiyor" olarak elenmisti.
+            if abs(Zs - za) < 0.6 or abs(Zs - zb) < 0.6:
+                continue
             if float(P[2]) > Zs * (1.0 + tol) + tol:
-                return True
+                hits += 1
+                if hits >= 2:        # tek ornek gurultu olabilir; iki ornek = engel
+                    return True
         return False
 
     def grid_segments(self, spacing=1.0, extent=14):
