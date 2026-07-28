@@ -39,8 +39,8 @@
     "sample_fps": 10,
     "expect": {
       "traffic": [14, 22],
-      "zones.0.impressions": [3, 8],
-      "zones.0.attention_rate": [18, 40],
+      "zones.0.impressions": [2, 8],
+      "zones.0.attention_rate": [12, 40],
       "zones.0.reaches": [3, 9],
       "zones.0.reachers": [2, 6],
       "measurement_health.direction_share": [80, 100],

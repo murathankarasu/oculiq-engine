@@ -731,9 +731,15 @@ class AttentionEngine:
                     ok = bool(q and has_dir
                               and scene.looks_at_3d(d["head3"], d["dir3"], q,
                                                     d.get("cone", 14.0), d["sig"]))
-                    # 3D güvenilirken görüş-hattı occlusion'ı (kişi engeli) uygulanır;
-                    # 2.5D'de uygulanmaz — derinlik olmadan yanlış bastırma riski yüksek.
+                    # 3D güvenilirken görüş-hattı engelleri düşürülür (2.5D'de
+                    # uygulanmaz — derinlik olmadan yanlış bastırma riski yüksek):
+                    #   a) hareketli engel: önde duran BAŞKA BİR KİŞİ
+                    #   b) statik engel: raf/direk/bench/tezgah — derinlik
+                    #      haritası boyunca ışın yürütmesiyle ("hedefin önünde
+                    #      başka obje var" durumu)
                     if ok and self._occluded(d, z, dets):
+                        ok = False
+                    if ok and q is not None and scene.sight_blocked(d["head3"], q["center"]):
                         ok = False
                     raw_by_zone[z["id"]] = ok
                     st["gaze3d_n"] += 1

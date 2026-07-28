@@ -67,8 +67,12 @@ Every measurement carries:
   scenes are indoor); `OCULIQ_DEPTH_MODEL=outdoor` for DOOH/open-air. Built once
   per job from the **per-pixel median of up to 3 frames** (~0.8 s apart) so a
   passer-by can't poison the calibration; gated by the reliability check (§3) —
-  falls back to 2.5D if unreliable. When 3D is reliable, a look is dropped if a
-  nearer person's body blocks the line of sight (occlusion test; 3D-gated only).
+  falls back to 2.5D if unreliable. Surface depth is **ground-anchored**: when the
+  depth map and the (person-height-calibrated) ground plane disagree by more than
+  1.5x, the ground solution wins — back-lit/glossy displays fooled the depth map
+  into 3x-oversized surfaces. When 3D is reliable a look is dropped if the line of
+  sight is blocked, by a nearer person (motion) or by a static object such as a
+  rack, pillar or counter (depth-map ray march). Both are 3D-gated only.
 
 ## 5. Line crossing (entrance counting)
 
