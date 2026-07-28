@@ -819,6 +819,10 @@ class AttentionEngine:
         zquads = {}
         zs = self._prep_zones(zones, W, H)
         zs_att, z_lines, z_staff = self._split_zones(zs)
+        z_mirror = [z for z in zs if z["type"] == "mirror"]
+        mirror_dropped = 0
+        if z_mirror:
+            _jlog(job, f"Mirror/reflection exclusion: {len(z_mirror)} area(s) marked")
         line_counters = [LineCounter(z["id"], z["line_px"][0], z["line_px"][1])
                          for z in z_lines]
         if z_lines:
@@ -890,6 +894,8 @@ class AttentionEngine:
             prev_t = t
 
             dets = self._detect_frame(frame, tiled, tracker)
+            dets, _md = self._drop_mirrored(dets, z_mirror)
+            mirror_dropped += _md
 
             # auto-upgrade: crowded scene detected -> switch to tiled multi-scan
             if not first_checked:
@@ -898,6 +904,8 @@ class AttentionEngine:
                     tiled = True
                     _jlog(job, f"{len(dets)} people in first frame — auto-switching to tiled multi-scan")
                     dets = self._detect_frame(frame, tiled, tracker)
+                    dets, _md = self._drop_mirrored(dets, z_mirror)
+                    mirror_dropped += _md
 
             peak = max(peak, len(dets))
             b = int(t // 2) * 2
@@ -1062,6 +1070,8 @@ class AttentionEngine:
         report["calibration"] = self._cal.state()
         if z_staff:
             report["staff_excluded"] = staff_excluded
+        if z_mirror:
+            report["mirror_dropped_samples"] = mirror_dropped
         if z_shelf and st["wrist_samples"] == 0:   # dürüstlük: sinyal yoksa 0 basılmaz, söylenir
             report["reach_note"] = ("no reach signal — wrist keypoints were not reliable "
                                     "in this footage (far camera / crowd mode)")
@@ -1132,6 +1142,7 @@ class AttentionEngine:
                 tiled = True
                 raws = self._detect_tiled(frame)
         dets = [self._build_det(r, i) for i, r in enumerate(raws)]
+        dets, _md = self._drop_mirrored(dets, [z for z in zs if z["type"] == "mirror"])
         heat = np.zeros((H // 4, W // 4), np.float32)
 
         rays = [[0.0, d["id"], int(d["c"][0]), int(d["c"][1]),
@@ -1421,11 +1432,36 @@ class AttentionEngine:
 
     @staticmethod
     def _split_zones(zs):
-        """Ölçüm rolüne göre ayır: dikkat yüzeyleri / giriş çizgileri / personel."""
-        att = [z for z in zs if z["type"] not in ("line", "staff")]
+        """Ölçüm rolüne göre ayır: dikkat yüzeyleri / giriş çizgileri / personel.
+        `mirror` alanları hiçbir listeye girmez — oradaki tespitler kare
+        başında tamamen elenir (bkz. _drop_mirrored)."""
+        att = [z for z in zs if z["type"] not in ("line", "staff", "mirror")]
         lines = [z for z in zs if z["type"] == "line" and z.get("line_px")]
         staff = [z for z in zs if z["type"] == "staff"]
         return att, lines, staff
+
+    def _drop_mirrored(self, dets, z_mirror):
+        """Ayna/vitrin camı alanındaki tespitleri ele.
+
+        Yansımalar hem trafiği şişirir hem SAHTE BAKIŞ üretir (yansımadaki kişi
+        yüzeye bakıyor görünür). Otomatik ayna tespiti güvenilmez olduğu için
+        alan operatörce işaretlenir — ölçüm yerine dürüst bir kural.
+
+        Ölçüt: kişinin ayak noktası ayna alanında VEYA kutusunun ağırlık merkezi
+        alanın içinde. Ayak yere basmayan (havada) yansımalar da böylece düşer."""
+        if not z_mirror:
+            return dets, 0
+        keep, dropped = [], 0
+        for d in dets:
+            bx, by, bw, bh = d["box"]
+            foot = (bx + bw / 2.0, by + float(bh))
+            mid = (bx + bw / 2.0, by + bh * 0.6)
+            if any(self._pt_in_zone(foot, z) or self._pt_in_zone(mid, z)
+                   for z in z_mirror):
+                dropped += 1
+                continue
+            keep.append(d)
+        return keep, dropped
 
     def _heat_add(self, heat, d, z, W, H):
         zc = z["center"]
@@ -1669,8 +1705,8 @@ class AttentionEngine:
                 cv2.putText(out, label, (lx0, ly0), cv2.FONT_HERSHEY_SIMPLEX,
                             0.55 * sc, WHITE, 2, cv2.LINE_AA)
                 continue
-            if z["type"] == "staff":
-                # personel alanı: kesikli gri çerçeve — metriklere girmez
+            if z["type"] in ("staff", "mirror"):
+                # personel / ayna alanı: kesikli gri çerçeve — metriklere girmez
                 ppx_s = z.get("poly_px")
                 pts_s = (np.array(ppx_s, np.int32) if ppx_s
                          else np.array([(x, y), (x + w, y), (x + w, y + h), (x, y + h)],
@@ -1684,7 +1720,8 @@ class AttentionEngine:
                         q2 = p1_ + (p2_ - p1_) * (min(j + 1, n_dash) / n_dash)
                         cv2.line(out, tuple(q1.astype(int)), tuple(q2.astype(int)),
                                  GRAY, max(2, int(2 * sc)), cv2.LINE_AA)
-                label = f'{z["label"]}  |  staff (excluded)'
+                label = (f'{z["label"]}  |  '
+                         + ("mirror (ignored)" if z["type"] == "mirror" else "staff (excluded)"))
                 (tw, th), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.5 * sc, 1)
                 cv2.putText(out, label, (int(pts_s[0][0]) + 4, int(pts_s[0][1]) - 6),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.5 * sc, GRAY, 1, cv2.LINE_AA)
@@ -1735,28 +1772,50 @@ class AttentionEngine:
                                        (x, y + h, 1, -1), (x + w, y + h, -1, -1)):
                 cv2.line(out, (cx_, cy_), (cx_ + sx * L, cy_), col, th)
                 cv2.line(out, (cx_, cy_), (cx_, cy_ + sy * L), col, th)
-            drew3d = False
-            if "head3" in d and scene is not None:
-                # 3D bakış ışını: kafa konumundan dünya-uzayında 2.5m ileri
+            # --- BAKIŞ KONİSİ (oklar yerine) ---
+            # Ok, projeksiyon patladığında ekranı boydan boya kesiyordu ve yönü
+            # olduğundan kesinmiş gibi gösteriyordu. Yerine: kafadan açılan
+            # yumuşak koni — uzunluğu HER ZAMAN kişi boyuna bağlı (patlayamaz),
+            # genişliği ölçüm toleransını (cone) dürüstçe gösterir, ve bakılan
+            # yüzey varsa ucunda nabız gibi atan bir hedef halkası olur.
+            dxx, dyy = d["dx"], d["dy"]
+            if "head3" in d and scene is not None:      # 3D varsa yön 3D'den
                 p1 = scene.project(d["head3"])
-                p2 = scene.project(d["head3"] + d["dir3"] * 2.5)
+                p2 = scene.project(d["head3"] + d["dir3"] * 1.2)
                 if p1 and p2:
-                    seg = math.hypot(p2[0] - p1[0], p2[1] - p1[1])
-                    if seg <= max(h * 1.8, 120 * sc):   # patlayan projeksiyon -> 2D'ye düş
-                        a1 = (int(p1[0]), int(p1[1]))
-                        a2 = (int(p2[0]), int(p2[1]))
-                        cv2.arrowedLine(out, a1, a2, (12, 12, 12), th + 4, cv2.LINE_AA, tipLength=0.28)
-                        cv2.arrowedLine(out, a1, a2, col, th + 1, cv2.LINE_AA, tipLength=0.28)
-                        drew3d = True
-            if not drew3d and d["dx"] is not None and (d["dx"] or d["dy"]):
-                ln = min(max(h * 0.9, 46 * sc), 150 * sc)  # boy-temelli + tavan
-                sx0, sy0 = int(d["c"][0]), int(d["c"][1])
-                ex, ey = int(d["c"][0] + d["dx"] * ln), int(d["c"][1] + d["dy"] * ln)
-                # koyu kontur + renkli gövde: her zeminde okunur ok
-                cv2.arrowedLine(out, (sx0, sy0), (ex, ey), (12, 12, 12),
-                                th + 4, cv2.LINE_AA, tipLength=0.3)
-                cv2.arrowedLine(out, (sx0, sy0), (ex, ey), col,
-                                th + 1, cv2.LINE_AA, tipLength=0.3)
+                    vx, vy = p2[0] - p1[0], p2[1] - p1[1]
+                    nv = math.hypot(vx, vy)
+                    if nv > 1e-3:
+                        dxx, dyy = vx / nv, vy / nv
+            if dxx is not None and (dxx or dyy):
+                hx, hy = d["c"][0], d["c"][1]
+                ln = min(max(h * 1.05, 52 * sc), 190 * sc)     # sabit tavan: taşma yok
+                half = math.radians(min(max(d.get("cone", 20.0), 8.0), 34.0))
+                a0 = math.atan2(dyy, dxx)
+                tip = (hx + math.cos(a0) * ln, hy + math.sin(a0) * ln)
+                p_l = (hx + math.cos(a0 - half) * ln * 0.92,
+                       hy + math.sin(a0 - half) * ln * 0.92)
+                p_r = (hx + math.cos(a0 + half) * ln * 0.92,
+                       hy + math.sin(a0 + half) * ln * 0.92)
+                fan = np.array([[hx, hy], p_l, tip, p_r], np.int32)
+                ov2 = out.copy()
+                cv2.fillPoly(ov2, [fan], col)
+                out = cv2.addWeighted(ov2, 0.22 if d["zone"] is not None else 0.12,
+                                      out, 0.78 if d["zone"] is not None else 0.88, 0)
+                cv2.polylines(out, [fan], True, col, max(1, th - 1), cv2.LINE_AA)
+                # merkez ekseni: yönü net okunur tutar
+                cv2.line(out, (int(hx), int(hy)), (int(tip[0]), int(tip[1])),
+                         col, max(1, th - 1), cv2.LINE_AA)
+                if d["zone"] is not None:
+                    # bakılan yüzeyde nabız: zamanla büyüyüp sönen halka (animasyon)
+                    ph = 0.0 if t is None else (t * 1.6) % 1.0
+                    rr = int((6 + 10 * ph) * sc) + 2
+                    ring = out.copy()
+                    cv2.circle(ring, (int(tip[0]), int(tip[1])), rr, col,
+                               max(1, int(2 * sc)), cv2.LINE_AA)
+                    out = cv2.addWeighted(ring, max(0.15, 1.0 - ph), out, min(0.85, ph), 0)
+                    cv2.circle(out, (int(tip[0]), int(tip[1])), max(2, int(2.5 * sc)),
+                               col, -1, cv2.LINE_AA)
             tag = f'#{d["id"]} {d["sig"]} {int(d["conf"]*100)}%'
             cv2.putText(out, tag, (x, y - 6), cv2.FONT_HERSHEY_SIMPLEX,
                         0.45 * sc, col, 1, cv2.LINE_AA)

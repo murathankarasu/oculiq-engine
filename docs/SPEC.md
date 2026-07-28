@@ -51,7 +51,9 @@ Every measurement carries:
 - Base half-angle: **35°** (`cone_deg`), auto-tuned per person by signal
   noise and the angular width of the surface (`auto_cone = on`).
 - 3D mode: when the scene reconstruction passes the reliability gate, the
-  test is a true ray-vs-3D-surface intersection; otherwise a 2.5D azimuth
+  test is a true ray-vs-3D-surface intersection; the 3D gaze pitch is clamped to
+  ±25° (retail gaze is essentially horizontal — an unclamped nose-offset pitch
+  threw looks at the ceiling); otherwise a 2.5D azimuth
   test with perspective foreshortening `k(y)` from auto-calibration.
 - The what-if simulator may recompute metrics at other cone angles
   (15–60°); such figures are simulations and are labeled as such.
@@ -104,7 +106,9 @@ Every measurement carries:
 
 `billboard`, `screen`, `window` (attention surfaces) · `shelf` (attention +
 reach) · `display` (attention surface, floor stand) · `line` (entrance
-counting only) · `staff` (exclusion area — persons spending ≥ 30% of their
+counting only) · `mirror` (reflection/glass area — every detection inside is
+discarded before measurement; reflections otherwise inflate traffic and create
+phantom looks) · `staff` (exclusion area — persons spending ≥ 30% of their
 visible time or ≥ 60 s inside are excluded from all metrics; the report
 discloses the excluded count).
 

@@ -93,7 +93,7 @@
             <div class="zone-pop hidden" id="zonePop">
               <input id="zpLabel" placeholder="e.g. Billboard A" maxlength="40" />
               <div class="zp-row">
-                <select id="zpType"><option value="billboard">billboard</option><option value="screen">digital screen</option><option value="window">shop window</option><option value="shelf">shelf</option><option value="display">display / stand</option><option value="staff">staff area (excluded)</option></select>
+                <select id="zpType"><option value="billboard">billboard</option><option value="screen">digital screen</option><option value="window">shop window</option><option value="shelf">shelf</option><option value="display">display / stand</option><option value="staff">staff area (excluded)</option><option value="mirror">mirror / glass (ignored)</option></select>
                 <input id="zpCost" type="number" min="0" placeholder="cost/day" />
               </div>
               <div class="zp-row"><button id="zpSave" class="primary sm">Save zone</button><button id="zpCancel" class="sm">Cancel</button></div>
@@ -226,6 +226,7 @@
               <option value="shelf">shelf</option>
               <option value="display">display</option>
               <option value="staff">staff area</option>
+              <option value="mirror">mirror / glass</option>
             </select>
           </div>
           <button id="lvmLine" class="seg-btn">Entrance line</button>
@@ -259,6 +260,6 @@
     </div>
   </div>
 
-  <script type="module" src="app.js?v=16"></script>
+  <script type="module" src="app.js?v=17"></script>
 </body>
 </html>

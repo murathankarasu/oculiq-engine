@@ -552,6 +552,11 @@ function renderReport(rep, jobId) {
     html += `<div class="wide-chart"><h4>Entrance counting</h4><p class="aud-note">${esc(rep.lines_note)}</p></div>`;
   }
 
+  if (rep.mirror_dropped_samples) {
+    html += `<div class="wide-chart"><h4>Mirror / glass exclusion <span class="new-tag">NEW</span></h4>
+      <p class="aud-note">${rep.mirror_dropped_samples} detection samples inside the marked mirror/glass areas were discarded — reflections would otherwise inflate traffic and create phantom looks.</p></div>`;
+  }
+
   if (rep.measurement_health) {
     const h = rep.measurement_health, sm = h.signal_mix || {};
     const chip = (k, v, warn) =>

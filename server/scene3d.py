@@ -632,7 +632,22 @@ class SceneModel:
         else:
             lat = max(-1.0, min(1.0, dx_img))
             fwd = math.sqrt(max(0.0, 1.0 - lat * lat))
+            # Dikey bileşen burun ofsetinden gelir ve gürültülüdür: kamera açısı
+            # ya da eğik duruş, bakışı tavana/zemine savurabiliyordu. Perakendede
+            # bakış esasen yataydır — pitch ±25° ile sınırlanır (yön uydurulmaz,
+            # yalnızca fiziksel olarak makul aralığa kırpılır).
             v = lat * L + fwd * C + (-dy_img) * u
+            n0 = np.linalg.norm(v)
+            if n0 > 1e-6:
+                v = v / n0
+                vert = float(v @ u)
+                lim = math.sin(math.radians(25.0))
+                if abs(vert) > lim:
+                    horiz = v - vert * u
+                    hn = np.linalg.norm(horiz)
+                    if hn > 1e-6:
+                        v = horiz / hn * math.cos(math.radians(25.0)) \
+                            + u * (lim if vert > 0 else -lim)
         n = np.linalg.norm(v)
         return v / n if n > 1e-6 else None
 
