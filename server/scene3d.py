@@ -557,7 +557,11 @@ class SceneModel:
                 for j in range(-R, R + 1):
                     P = p0 + b_ax * (i * spacing) + a_ax * (j * spacing)
                     q = self.project(P)
-                    ok = inb(q) and self._visible(P, q)   # duvar arkasi cizilmez
+                    # Izgara SALT GORSEL: burada siki tolerans kullanilir (0.10),
+                    # cunku yanlis cizilen bir cizgi kalibrasyonu bozuk gosterir.
+                    # Olcum yollarindaki tolerans (0.30) bilerek muhafazakar
+                    # birakildi — orada gercek bir bakisi elemek daha pahali.
+                    ok = inb(q) and self._visible(P, q, tol=0.10)
                     if prev is not None and ok:
                         segs.append((prev, q, i % 5 == 0))
                     prev = q if ok else None

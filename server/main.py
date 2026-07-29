@@ -422,8 +422,12 @@ async def camera_live_frame(cam_id: str):
 @app.get("/api/live/{cam_id}")
 async def live_counters(cam_id: str):
     w = _workers.get(cam_id)
-    if not w or not w.is_alive():
+    if not w:
         return {"status": "stopped"}
+    if not w.is_alive():
+        # thread bitti: hata varsa SAKLAMA — "stopped" demek sorunu gizlerdi
+        return {"status": w.status if w.status in ("failed", "error") else "stopped",
+                "error": w.error}
     out = dict(w.live) if w.live else {}
     out["status"] = w.status
     out["error"] = w.error

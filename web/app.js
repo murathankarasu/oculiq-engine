@@ -1397,7 +1397,8 @@ async function lvTick() {
     try {
       const lv = await (await fetch(`/api/live/${c.id}`)).json();
       if (lv.status !== "live") {
-        box.innerHTML = `<small>${lv.status || "stopped"}${lv.error ? " · " + esc(lv.error) : ""}</small>`;
+        const bad = lv.status === "failed" || lv.status === "error";
+        box.innerHTML = `<small${bad ? ' style="color:var(--danger)"' : ""}>${bad ? "⚠ " : ""}${lv.status || "stopped"}${lv.error ? " · " + esc(lv.error) : ""}</small>`;
       } else {
         const zbits = Object.values(lv.zones || {}).map((z) =>
           `<span class="lv-kpi"><b>${z.lookers}</b> looking · ${fmt(z.att, 0)}s <small>${esc(z.label)}</small></span>`);

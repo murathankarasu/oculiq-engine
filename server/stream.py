@@ -216,6 +216,35 @@ class StreamWorker(threading.Thread):
 
     # -- ana döngü --
     def run(self):
+        """Dis kabuk: beklenmedik bir hata thread'i OLDURMEZ.
+
+        Eskiden run() icindeki herhangi bir istisna daemon thread'i sessizce
+        sonlandiriyordu; kullanici arayuzde yalnizca "stopped" goruyor, gunlukte
+        iz kalmiyordu. Artik hata yakalanir, kullaniciya gosterilir ve worker
+        artan bekleme ile kendini yeniden dener (kalici hatada durur)."""
+        fails = 0
+        while not self.stop_flag.is_set():
+            try:
+                self._run_once()
+                return                      # temiz cikis (stop istendi)
+            except Exception as e:
+                fails += 1
+                self.status = "error"
+                self.error = f"{type(e).__name__}: {e}"
+                try:
+                    import traceback, sys
+                    print(f"[stream {self.cam.get('id')}] worker crashed "
+                          f"({fails}): {self.error}", file=sys.stderr)
+                    traceback.print_exc()
+                except Exception:
+                    pass
+                if fails >= 5 or self.stop_flag.is_set():
+                    self.status = "failed"  # kalici hata: sessizce olme, soyle
+                    return
+                self.stop_flag.wait(min(5 * fails, 30))
+        self.status = "stopped"
+
+    def _run_once(self):
         cam = self.cam
         sample_fps = float(cam.get("sample_fps", 5))
         self._dt_target = 1.0 / max(sample_fps, 0.5)
