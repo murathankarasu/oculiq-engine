@@ -117,6 +117,18 @@ phantom looks) · `staff` (exclusion area — persons spending ≥ 30% of their
 visible time or ≥ 60 s inside are excluded from all metrics; the report
 discloses the excluded count).
 
+## 8b. Live vs. video parity
+
+A live camera produces the **same report structure and the same metrics** as a
+video analysis: 3D scene (built once per camera, since the camera is fixed),
+surface sizes, attention rate with CI, AQS, TTFL, glances, stopping power,
+entrance counting, the visit package when enabled, and measurement-health
+telemetry (`GET /api/cameras/{id}/report`).
+
+Two things are unavailable live, by design rather than omission, and the report
+states so in `live_limits`: **evidence clips** and the **what-if simulator**.
+Both require stored footage, and live mode records none (§9).
+
 ## 9. Privacy invariants
 
 On-device processing only; no facial recognition, no identification, no

@@ -154,6 +154,9 @@ class StreamWorker(threading.Thread):
                    "gaze3d_n": 0, "gaze_total": 0, "wrist_samples": 0,
                    "record_rays": False}
         self.win_samples = 0
+        if not hasattr(self, "_scene"):
+            self._scene, self._zquads = None, {}
+            self._scene_tried, self._scene_state = False, None
 
     def _aggregate(self):
         """Pencere durumundan (persons + sayaçlar) agregat satırları üret.
@@ -231,6 +234,84 @@ class StreamWorker(threading.Thread):
                     lc.last_evt.pop(pid, None)
         self.pruned_total += len(drop)
         return len(drop)
+
+    def live_report(self):
+        """Canli pencerenin TAM raporu — video moduyla ayni yapi.
+
+        Ayni _report() cagrilir, dolayisiyla AQS, TTFL, glances, stopping power,
+        dwell histogrami, guven araliklari ve (paket acikken) ziyaret funnel'i
+        canlida da uretilir. Fark yalnizca dogasindan gelenler: canlida kayit
+        tutulmadigi icin kanit klipleri ve what-if isinlari YOKTUR — bu, rapora
+        acikca yazilir, sessizce bos birakilmaz."""
+        eng = self.eng
+        persons, valid = self._filtered_persons()
+        st = self.st
+        elapsed = max(time.time() - self.started_ts, 0.1)
+        rep = eng._report(persons, st["zs_att"], st["timeline"],
+                          duration=elapsed, peak=0,
+                          cost_map=self.cam.get("costs") or {},
+                          still=False, elapsed=elapsed, sim=None)
+        rep["mode"] = "live"
+        rep["scan_mode"] = "live single-pass"
+        rep["window_started"] = int(self.started_ts)
+        if self._scene_state:
+            rep["scene3d"] = self._scene_state
+        # 3D yuzey olculeri (video raporuyla ayni alanlar + ayni durustluk kapisi)
+        if self._scene is not None and self._zquads:
+            for z, zr in zip(st["zs_att"], rep.get("zones", [])):
+                q = self._zquads.get(z["id"])
+                if not q:
+                    continue
+                wq, hq = float(q["w_m"]), float(q["h_m"])
+                if 0.15 <= wq <= 20.0 and 0.15 <= hq <= 20.0:
+                    zr["size_m"] = [q["w_m"], q["h_m"]]
+                    zr["size_source"] = q.get("depth_source", "depth-map")
+                else:
+                    zr["size_note"] = (f"surface size withheld — implausible "
+                                       f"({wq:.1f}x{hq:.1f} m); depth unreliable here")
+                zr["zone_depth_m"] = q["depth_m"]
+                if q.get("tilt_deg") is not None:
+                    zr["surface_tilt_deg"] = q["tilt_deg"]
+        # cizgiler + capture rate (video ile ayni alan adlari)
+        if self.line_counters:
+            traffic_n = len(persons)
+            lines_out = []
+            for z, lc in zip([z for z in self._zs_full if z["type"] == "line"],
+                             self.line_counters):
+                ins, outs, ev = lc.counts(valid)
+                lines_out.append({
+                    "id": z["id"], "label": z["label"], "line": z.get("line_norm"),
+                    "enters": ins, "exits": outs,
+                    "capture_rate": round(ins / traffic_n * 100, 1) if traffic_n else 0.0,
+                    "events": [{"t": e[0], "pid": e[1], "dir": e[2]} for e in ev[:200]],
+                })
+            rep["lines"] = lines_out
+            rep["capture_rate"] = lines_out[0]["capture_rate"] if lines_out else None
+            if (self.cam.get("modules") or {}).get("visits"):
+                rep["visits"] = {"enabled": True,
+                                 "lines": eng._visits(self.line_counters,
+                                                      [z for z in self._zs_full
+                                                       if z["type"] == "line"],
+                                                      persons, valid, st["zs_att"])}
+            else:
+                rep["visits"] = {"enabled": False,
+                                 "note": "Visit analytics is a separate package."}
+        mh = st.get("mh", {})
+        det_n = max(mh.get("det", 0), 1)
+        rep["measurement_health"] = {
+            "detections": mh.get("det", 0),
+            "direction_share": round(mh.get("dir", 0) / det_n * 100, 1),
+            "signal_mix": {k: round(v / det_n * 100, 1) for k, v in mh.get("sig", {}).items()},
+            "avg_det_conf": round(mh.get("conf_sum", 0.0) / det_n, 2),
+            "tracks_seen": len(st["persons"]),
+            "tracks_stitched": 0,
+            "ghosts_dropped": max(len(st["persons"]) - len(persons), 0),
+            "gaze3d_pct": round(st["gaze3d_n"] / max(st["gaze_total"], 1) * 100, 1),
+        }
+        rep["live_limits"] = ("No footage is recorded in live mode, so evidence clips "
+                              "and the what-if simulator are unavailable; every other "
+                              "metric matches a video analysis.")
+        return rep
 
     def _record_window_dataset(self):
         """Pencere kapanırken (saat devri / durma) dikkat epizotlarını veri setine yaz.
@@ -367,7 +448,31 @@ class StreamWorker(threading.Thread):
                     finally:
                         self.eng._cal = prev_cal
                 b = int(t // 2) * 2
-                self.st["scene"], self.st["scene_ok"], self.st["zquads"] = None, False, {}
+                # CANLI 3D: kamera sabit oldugundan sahne bir kez kurulur ve
+                # pencere boyunca kullanilir — boylece canli mod, video moduyla
+                # ayni veriyi uretir (3D bakis, gercek yuzey olcusu, mesafe).
+                if (self._scene is None and not self._scene_tried
+                        and len(self.st["foot_samples"]) >= 12):
+                    self._scene_tried = True
+                    try:
+                        from server.scene3d import SceneModel
+                        sc = SceneModel().build(frame, self.st["foot_samples"],
+                                                scene_type=cam.get("scene_type"))
+                        if sc.enabled and sc.reliable():
+                            self._scene = sc
+                            self._zquads = {z["id"]: sc.zone_quad(z)
+                                            for z in self.st["zs_att"]}
+                            for q in self._zquads.values():
+                                if q:
+                                    q["_mesh"], q["_nseg"] = sc.zone_mesh(q)
+                            sc._grid = sc.grid_segments()
+                        self._scene_state = sc.state()
+                    except Exception as e:
+                        self._scene_state = {"enabled": False,
+                                             "note": f"{type(e).__name__}: {e}"}
+                self.st["scene"] = self._scene
+                self.st["scene_ok"] = self._scene is not None
+                self.st["zquads"] = self._zquads
                 self.eng._step_frame(self.st, dets, t, dtf, b)
                 self.win_samples += 1
                 self.samples_done += 1
@@ -387,7 +492,8 @@ class StreamWorker(threading.Thread):
                         lc = {c.zid: c.counts()[:2] for c in self.line_counters}
                         annotated = self.eng._draw(
                             frame, dets, self._zs_full, self.st["heat"], t,
-                            len(live_persons), tiled=False, blur=True, line_counts=lc)
+                            len(live_persons), tiled=False, blur=True, line_counts=lc,
+                            scene=self._scene, zquads=self._zquads)
                         ok2, buf = cv2.imencode(".jpg", annotated,
                                                 [cv2.IMWRITE_JPEG_QUALITY, 72])
                         if ok2:

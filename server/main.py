@@ -425,6 +425,15 @@ async def camera_live_frame(cam_id: str):
                     headers={"Cache-Control": "no-store"})
 
 
+@app.get("/api/cameras/{cam_id}/report")
+async def camera_live_report(cam_id: str):
+    """Canli pencerenin tam raporu — video analiziyle ayni veri yapisi."""
+    w = _workers.get(cam_id)
+    if not w or not w.is_alive():
+        raise HTTPException(404, "camera is not running")
+    return w.live_report()
+
+
 @app.get("/api/live/{cam_id}")
 async def live_counters(cam_id: str):
     w = _workers.get(cam_id)
