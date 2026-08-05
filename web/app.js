@@ -2,6 +2,23 @@
 // All inference happens in the local Python backend; this file is pure UI.
 
 const $ = (id) => document.getElementById(id);
+
+/* --- erisim belirteci: uzaktan (saha) kurulumda gerekli --------------------
+   URL'de ?token=... ile bir kez gelinir, sonrasi icin saklanir ve her istege
+   otomatik eklenir. Tek makinede (localhost, token tanimsiz) hicbir sey degismez. */
+(() => {
+  const u = new URL(location.href);
+  const t = u.searchParams.get("token");
+  if (t) { try { localStorage.setItem("oculiq_token", t); } catch {} u.searchParams.delete("token"); history.replaceState(null, "", u); }
+  let tok = ""; try { tok = localStorage.getItem("oculiq_token") || ""; } catch {}
+  if (!tok) return;
+  const orig = window.fetch;
+  window.fetch = (input, init = {}) => {
+    const headers = new Headers((init && init.headers) || {});
+    headers.set("x-oculiq-token", tok);
+    return orig(input, { ...init, headers });
+  };
+})();
 const video = $("video"), photo = $("photo"), draw = $("draw");
 const dctx = draw.getContext("2d");
 
@@ -1400,11 +1417,16 @@ async function lvTick() {
         const bad = lv.status === "failed" || lv.status === "error";
         box.innerHTML = `<small${bad ? ' style="color:var(--danger)"' : ""}>${bad ? "⚠ " : ""}${lv.status || "stopped"}${lv.error ? " · " + esc(lv.error) : ""}</small>`;
       } else {
+        const st = lv.stream || {};
+        const recv = st.receiving;
+        const health = st.frame_age_s != null
+          ? `<span class="lv-kpi" ${recv ? "" : 'style="color:var(--danger)"'}><b>${recv ? "receiving" : "⚠ no frames"}</b> <small>${fmt(st.frame_age_s, 1)}s ago · ${st.samples_measured} measured · ${st.reconnects} reconnects${st.stalls ? " · " + st.stalls + " stalls" : ""}</small></span>`
+          : "";
         const zbits = Object.values(lv.zones || {}).map((z) =>
           `<span class="lv-kpi"><b>${z.lookers}</b> looking · ${fmt(z.att, 0)}s <small>${esc(z.label)}</small></span>`);
         const lbits = Object.entries(lv.lines || {}).map(([zid, l]) =>
           `<span class="lv-kpi"><b>${l.in}</b> in · ${l.out} out</span>`);
-        box.innerHTML = `<span class="lv-kpi"><b>${lv.traffic}</b> tracked</span>` + zbits.join("") + lbits.join("");
+        box.innerHTML = `<span class="lv-kpi"><b>${lv.traffic}</b> tracked</span>` + zbits.join("") + lbits.join("") + health;
       }
     } catch { box.innerHTML = "<small>unreachable</small>"; }
     lvChart(c);   // grafik durumdan bağımsız: geçmiş agregatlar her zaman görünür

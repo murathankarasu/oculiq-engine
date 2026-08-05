@@ -2,6 +2,7 @@
 
 All inference runs on this machine (YOLO11-pose). Nothing is uploaded anywhere.
 """
+import hmac
 import json
 import os
 import shutil
@@ -431,6 +432,18 @@ async def live_counters(cam_id: str):
     out = dict(w.live) if w.live else {}
     out["status"] = w.status
     out["error"] = w.error
+    # akis sagligi: "live" demek yetmez — veri gercekten akiyor mu?
+    now = time.time()
+    age = (now - w.last_frame_ts) if w.last_frame_ts else None
+    out["stream"] = {
+        "frame_age_s": round(age, 1) if age is not None else None,
+        "frames_read": w.frames_read,
+        "samples_measured": w.samples_done,
+        "reconnects": w.reconnects,
+        "stalls": w.stalls,
+        "uptime_s": int(now - w.started_ts),
+        "receiving": bool(age is not None and age < w.STALL_SEC),
+    }
     return out
 
 
@@ -445,6 +458,49 @@ async def dataset_stats():
     """Birikmiş dikkat-olay veri seti — retail benchmark + model tohumu göstergesi."""
     from server import dataset
     return dataset.stats()
+
+
+# ---------------- access control ----------------
+# Varsayilan: yalnizca 127.0.0.1 dinlenir ve token gerekmez (tek makine kullanimi).
+# AVM/saha kurulumunda sunucu aga acilacaksa (HOST=0.0.0.0) OCULIQ_TOKEN sarttir:
+# token yokken ag arayuzune baglanmak REDDEDILIR — yanlislikla acik birakilan bir
+# olcum sunucusu, kamera goruntusune erisim demektir.
+ACCESS_TOKEN = os.environ.get("OCULIQ_TOKEN", "").strip()
+_PUBLIC_PATHS = ("/health",)
+
+
+def _is_local(request) -> bool:
+    host = (request.client.host if request.client else "") or ""
+    return host in ("127.0.0.1", "::1", "localhost")
+
+
+@app.get("/health")
+async def health():
+    return {"ok": True, "auth": bool(ACCESS_TOKEN), "workers": len(_workers)}
+
+
+@app.middleware("http")
+async def require_token(request, call_next):
+    """Kural sirasi (basit ve denetlenebilir olmasi icin):
+      1. /health her zaman aciktir (izleme/nabiz kontrolu).
+      2. 127.0.0.1'den gelen istek serbesttir — makineye fiziksel erisimi olan
+         zaten her seye erisebilir; tek-makine kullanimi hic degismez.
+      3. Uzaktan gelen istek: OCULIQ_TOKEN tanimli DEGILSE reddedilir. Yanlislikla
+         aga acilmis bir olcum sunucusu, canli kamera goruntusu demektir.
+      4. Uzaktan + token tanimli: X-Oculiq-Token basligi ya da ?token= dogrulanir."""
+    path = request.url.path
+    if path in _PUBLIC_PATHS:
+        return await call_next(request)
+    if _is_local(request):
+        return await call_next(request)
+    if not ACCESS_TOKEN:
+        return JSONResponse({"detail": "remote access requires OCULIQ_TOKEN"},
+                            status_code=403)
+    supplied = (request.headers.get("x-oculiq-token")
+                or request.query_params.get("token") or "")
+    if not hmac.compare_digest(supplied, ACCESS_TOKEN):
+        return JSONResponse({"detail": "invalid or missing token"}, status_code=401)
+    return await call_next(request)
 
 
 @app.middleware("http")

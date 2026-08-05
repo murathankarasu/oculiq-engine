@@ -22,4 +22,12 @@ if ! python -c "import ultralytics, fastapi, uvicorn" 2>/dev/null; then
   pip install -q -r server/requirements.txt
 fi
 
-exec python -m uvicorn server.main:app --host 127.0.0.1 --port "${PORT:-8123}"
+# Varsayilan: yalnizca bu makine (127.0.0.1). Saha kurulumunda aga acmak icin
+# .env'e HOST=0.0.0.0 ve OCULIQ_TOKEN=<uzun-rastgele-deger> yaz — token olmadan
+# ag arayuzunden gelen istekler reddedilir (bkz. server/main.py).
+HOST="${HOST:-127.0.0.1}"
+if [ "$HOST" != "127.0.0.1" ] && [ -z "$OCULIQ_TOKEN" ]; then
+  echo "[oculiq] HOST=$HOST ama OCULIQ_TOKEN tanimli degil — ag erisimi reddedilecek."
+  echo "[oculiq] .env dosyasina ekleyin:  OCULIQ_TOKEN=$(python3 -c 'import secrets;print(secrets.token_urlsafe(24))')"
+fi
+exec python -m uvicorn server.main:app --host "$HOST" --port "${PORT:-8123}"

@@ -102,6 +102,9 @@ def query_timeseries(camera_id, zone_id=None, since=None, until=None):
 # ---------------- worker ----------------
 class StreamWorker(threading.Thread):
     FLUSH_SEC = 60          # agregat upsert aralığı
+    STALL_SEC = 20          # bu kadar süre kare gelmezse kaynak donmuş sayılır
+    PRUNE_AT = 400          # pencerede bu kadar kişi birikince budama başlar
+    PRUNE_IDLE_SEC = 90     # bu süredir görülmeyen ve hiç bakmamış kayıt düşer
 
     def __init__(self, engine, cam):
         """cam: {id, name, url, zones, costs?, sample_fps?, loop?}"""
@@ -115,6 +118,14 @@ class StreamWorker(threading.Thread):
         self.last_frame = None       # SADECE bellekte: zone çizimi için ham kare (blursuz)
         self.preview_jpg = None      # canlı izleme: anotasyonlu + yüz-bulanık JPEG (bellekte)
         self.started_ts = time.time()
+        # --- akis sagligi (AVM pilotu): "live" demek yetmez, VERI AKIYOR MU? ---
+        self.last_frame_ts = 0.0     # kaynaktan en son kare okunma zamani
+        self.last_sample_ts = 0.0    # en son ISLENEN (olculen) kare zamani
+        self.frames_read = 0
+        self.samples_done = 0
+        self.reconnects = 0
+        self.stalls = 0
+        self.pruned_total = 0
 
     # -- kaynak --
     def _open(self):
@@ -182,6 +193,43 @@ class StreamWorker(threading.Thread):
                                or v.get("staff_sec", 0) >= 0.3 * max(v.get("seen_sec", 0), 1e-6))}
         valid = set(persons) | {a for a, c in aliases.items() if c in persons}
         return persons, valid
+
+    def _prune_window(self, now):
+        """Uzun calisma dayanikliligi: saatlik pencere icinde de bellek buyur.
+
+        AVM girisinde saatte binlerce kisi gecer; her biri dwell/interval/hiz
+        listesi tutar. Olcume KATKISI BITMIS kayitlar (uzun suredir gorulmeyen
+        ve hicbir yuzeye bakmamis olanlar) duserulur — agregat sayilari
+        korunur, cunku dusen kayitlarin dwell'i zaten sifirdir. Bakmis olanlar
+        pencere sonuna kadar tutulur (rapor/agregat icin gerekli)."""
+        st = self.st
+        persons = st["persons"]
+        if len(persons) < self.PRUNE_AT:
+            return 0
+        cut = now - self.PRUNE_IDLE_SEC
+        drop = []
+        for pid, p in persons.items():
+            if p.get("last_t", 0) > cut:
+                continue                      # hala sahnede
+            if any(v > 0 for v in p["dwell"].values()):
+                continue                      # olcume katki verdi: tut
+            if p.get("reach_events"):
+                continue
+            drop.append(pid)
+        for pid in drop:
+            persons.pop(pid, None)
+            st.get("dir_ema", {}).pop(pid, None)
+        # yon-yumusatma tablosu ve cizgi sayaci durumu da temizlenir
+        ema = st.get("dir_ema", {})
+        for pid in list(ema):
+            if pid not in persons:
+                ema.pop(pid, None)
+        for lc in self.line_counters:
+            for pid in list(lc.side):
+                if pid not in persons:
+                    lc.side.pop(pid, None)
+        self.pruned_total += len(drop)
+        return len(drop)
 
     def _record_window_dataset(self):
         """Pencere kapanırken (saat devri / durma) dikkat epizotlarını veri setine yaz.
@@ -278,6 +326,7 @@ class StreamWorker(threading.Thread):
             prev_t = None
             fi = 0
 
+            self.last_frame_ts = time.time()      # baglanti kuruldu: sayaci baslat
             while not self.stop_flag.is_set():
                 ok, frame = cap.read()
                 if not ok:
@@ -287,6 +336,16 @@ class StreamWorker(threading.Thread):
                     break                             # gerçek kaynak koptu -> reconnect
                 fi += 1
                 now = time.time()
+                # DONMA TESPITI: cap.read() True donse bile kaynak bayat kare
+                # verebilir (RTSP/HLS donmasi). Kare gelmiyorsa yeniden baglan —
+                # sessizce "live" gorunup olcum uretmemek en tehlikeli hata.
+                if now - self.last_frame_ts > self.STALL_SEC:
+                    self.stalls += 1
+                    self.status = "stalled"
+                    self.error = f"no frames for {int(now - self.last_frame_ts)}s — reconnecting"
+                    break
+                self.last_frame_ts = now
+                self.frames_read += 1
                 if loop:                              # dosya gerçek-zaman hızında aksın
                     time.sleep(max(0.0, 1.0 / src_fps - 0.002))
                 if now - last_sample < self._dt_target:
@@ -310,6 +369,8 @@ class StreamWorker(threading.Thread):
                 self.st["scene"], self.st["scene_ok"], self.st["zquads"] = None, False, {}
                 self.eng._step_frame(self.st, dets, t, dtf, b)
                 self.win_samples += 1
+                self.samples_done += 1
+                self.last_sample_ts = now
                 self.last_frame = frame               # bellekte tek kare; diske yazılmaz
 
                 live_persons = {k: v for k, v in self.st["persons"].items()
@@ -336,6 +397,7 @@ class StreamWorker(threading.Thread):
 
                 if now - last_flush >= self.FLUSH_SEC:
                     self._flush(cur_hour)
+                    self._prune_window(now)     # pencere içi bellek budaması
                     last_flush = now
                 new_hour = int(now // 3600) * 3600
                 if new_hour != cur_hour:              # saat devri: kapat + sıfırla
@@ -350,6 +412,7 @@ class StreamWorker(threading.Thread):
             cap.release()
             if not loop and not self.stop_flag.is_set():
                 self.status = "reconnecting"
+                self.reconnects += 1
                 time.sleep(min(backoff, 60))
 
         self.status = "stopped"
