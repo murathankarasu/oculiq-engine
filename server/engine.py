@@ -212,6 +212,7 @@ class KCalibrator:
 
 
 class LineCounter:
+    MIN_GAP_S = 2.0     # aynı kişi için iki geçiş arasındaki en kısa süre
     """Giriş-çıkış çizgisi sayacı (Spec v1.0 §5).
 
     Çizgi 2 noktayla tanımlı; "in" = p1→p2 vektörünün SOL normali yönü
@@ -228,6 +229,7 @@ class LineCounter:
         self.ux, self.uy = dx / self.length, dy / self.length      # çizgi yönü
         self.nx, self.ny = -self.uy, self.ux                       # sol normal = "in"
         self.side = {}      # pid -> onaylı taraf (+1 in tarafı, -1 out tarafı)
+        self.last_evt = {}  # pid -> son geçiş zamanı (kapı önü salınımı debounce)
         self.events = []    # (t, pid, "in"|"out")
 
     def update(self, pid, foot, h, t):
@@ -243,8 +245,14 @@ class LineCounter:
             return
         if s != prev:
             u = (rx * self.ux + ry * self.uy) / self.length
-            if -0.1 <= u <= 1.1:                         # segmentin gerçekten üstünden
+            # DEBOUNCE: magaza kapisinin onunde durup one-arkaya salinan kisi
+            # (telefonuna bakan, arkadasini bekleyen) her salinimda bir ziyaret
+            # uretiyordu. Ayni kimlik icin ardisik gecisler arasinda en az
+            # MIN_GAP_S olmali; yoksa gecis kaydedilmez, yalnizca taraf guncellenir.
+            last = self.last_evt.get(pid)
+            if -0.1 <= u <= 1.1 and (last is None or t - last >= self.MIN_GAP_S):
                 self.events.append((round(t, 2), pid, "in" if s > 0 else "out"))
+                self.last_evt[pid] = t
             self.side[pid] = s
 
     def counts(self, valid_pids=None):
@@ -1826,7 +1834,9 @@ class AttentionEngine:
         if scene is not None and scene.enabled:
             hud += f'  ·  3D locked {scene.confidence:.0f}%'
         if t is not None:
-            hud += f'  ·  t={t:.1f}s'
+            # canli modda t epoch saniyesidir; ekranda duvar saati anlamlidir
+            hud += ('  ·  ' + time.strftime('%H:%M:%S', time.localtime(t))
+                    if t > 1e9 else f'  ·  t={t:.1f}s')
         (tw, th), _ = cv2.getTextSize(hud, cv2.FONT_HERSHEY_SIMPLEX, 0.55 * sc, 2)
         cv2.rectangle(out, (12, 12), (tw + 32, th + 28), DARK, -1)
         cv2.putText(out, hud, (22, th + 20), cv2.FONT_HERSHEY_SIMPLEX,

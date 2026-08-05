@@ -228,6 +228,7 @@ class StreamWorker(threading.Thread):
             for pid in list(lc.side):
                 if pid not in persons:
                     lc.side.pop(pid, None)
+                    lc.last_evt.pop(pid, None)
         self.pruned_total += len(drop)
         return len(drop)
 
