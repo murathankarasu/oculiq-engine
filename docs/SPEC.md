@@ -126,6 +126,9 @@ Audience estimates (if enabled) are aggregate-only with k-anonymity (k ≥ 5).
    calibrated ground plane rather than the depth map, the report says so
    (`size_source: ground-anchored`).
 2. Signal mix and confidence intervals are always reported.
+2a. When 3D calibration is weak, the report says **why and what to change on
+   site** (`scene3d.diagnosis`: distinct people used, height spread, ground-plane
+   agreement, camera height/tilt) instead of only printing a confidence score.
 2b. Every report carries **measurement-health telemetry** (direction share,
    signal mix, detector confidence, tracks seen/stitched, ghosts dropped,
    3D-path share) — a weak scene is disclosed, never hidden.

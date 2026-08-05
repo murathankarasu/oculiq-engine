@@ -745,9 +745,102 @@ class SceneModel:
         return img
 
     # ---------- rapor ----------
+    def diagnose(self):
+        """Kalibrasyon tanisi: NEDEN zayif ve saha ekibi NE YAPMALI.
+
+        3D guven skoru tek basina "%48" der ve operatoru caresiz birakir. Bu
+        fonksiyon, kalibrasyonun hangi girdisinin yetersiz oldugunu soyler ve
+        her biri icin kamerada/sahnede yapilabilecek somut bir duzeltme verir.
+        Tahmin uretmez: yalnizca olculmus degerlere bakar.
+
+        -> {"level": ok|weak|failed, "findings": [{code, severity, what, fix}]}
+        """
+        f = []
+        add = lambda c, sev, what, fix: f.append(
+            {"code": c, "severity": sev, "what": what, "fix": fix})
+
+        if not self.enabled:
+            add("no_scene", "blocker",
+                f"3D scene could not be built ({self.note or 'unknown reason'}).",
+                "Check that the frame is not black/overexposed and that people "
+                "are visible at full height somewhere in the shot.")
+            return {"level": "failed", "findings": f}
+
+        persons_used = getattr(self, "persons_used", 0)
+        inliers = getattr(self, "inliers", 0)
+
+        # 1) Kalibrasyon insan boylarindan cikar: az kisi = zayif dayanak
+        if persons_used < 3:
+            add("few_people", "blocker",
+                f"Only {persons_used} distinct people fed the calibration.",
+                "Record a longer clip, or one with more foot traffic. The scene "
+                "scale is derived from people's heights — a handful is not enough.")
+        elif persons_used < 8:
+            add("few_people", "warning",
+                f"{persons_used} distinct people — thin evidence for scale.",
+                "A few more minutes of footage will tighten the calibration.")
+
+        # 2) Tutarlilik: boy dagilimi sikiysa geometri oturmustur
+        if self.height_std is not None and self.height_mean:
+            if self.height_std > 0.28:
+                add("height_spread", "blocker",
+                    f"Reconstructed heights vary widely (±{self.height_std:.2f} m).",
+                    "Usually partial bodies: people cut off by the frame edge, by "
+                    "shelves, or standing behind counters. Aim the camera so whole "
+                    "bodies (head to feet) are visible in the measured area.")
+            elif self.height_std > 0.16:
+                add("height_spread", "warning",
+                    f"Height spread ±{self.height_std:.2f} m is on the high side.",
+                    "Include more of the floor so feet are visible; foot position "
+                    "is what anchors depth.")
+            if not (1.45 <= self.height_mean <= 1.95):
+                add("height_bias", "warning",
+                    f"Mean reconstructed height {self.height_mean:.2f} m is off the "
+                    "1.7 m assumption.",
+                    "Typically a very wide lens or a steep top-down angle. Metrics "
+                    "still work, but absolute sizes will carry that bias.")
+
+        if self.samples and inliers and inliers / max(self.samples, 1) < 0.35:
+            add("inconsistent", "warning",
+                f"Only {inliers} of {self.samples} samples agreed with the fitted "
+                "ground plane.",
+                "Reflective floors and mirrors are the usual cause — mark mirrors "
+                "as a `mirror` surface so reflections stop feeding calibration.")
+
+        # 3) Kamera geometrisi: cok alcak/yuksek ya da dik tepeden
+        if self.cam_height is not None:
+            if self.cam_height < 1.8:
+                add("camera_low", "warning",
+                    f"Camera sits at {self.cam_height:.1f} m.",
+                    "Low mounts make people occlude each other. 2.5–4 m looking "
+                    "along the space works best.")
+            elif self.cam_height > 8.0:
+                add("camera_high", "warning",
+                    f"Camera sits at {self.cam_height:.1f} m.",
+                    "From very high up, faces are rarely visible, so attention "
+                    "falls back to body orientation and gets coarser.")
+        if self.tilt_deg is not None and self.tilt_deg > 55:
+            add("camera_steep", "warning",
+                f"Camera looks down steeply ({self.tilt_deg:.0f}°).",
+                "A near top-down view hides faces. Tilt closer to horizontal so "
+                "head direction can be read.")
+
+        blockers = [x for x in f if x["severity"] == "blocker"]
+        if not self.reliable():
+            level = "failed"
+            if not blockers:
+                add("low_confidence", "blocker",
+                    f"Calibration confidence {self.confidence:.0f}% is below the "
+                    "40% gate, so 3D results are withheld and 2.5D is used.",
+                    "Fix the warnings above; each one feeds the same score.")
+        else:
+            level = "weak" if f else "ok"
+        return {"level": level, "findings": f}
+
     def state(self):
         if not self.enabled:
-            return {"enabled": False, "note": self.note}
+            return {"enabled": False, "note": self.note,
+                    "diagnosis": self.diagnose()}
         s = {"enabled": True,
              "model": f"Depth Anything V2 metric ({DEPTH_VARIANT}, small)"
                       + (f", {self.depth_frames_used}-frame median"
@@ -766,4 +859,5 @@ class SceneModel:
             s["camera_tilt_deg"] = self.tilt_deg
         if self.note:
             s["note"] = self.note
+        s["diagnosis"] = self.diagnose()
         return s

@@ -574,6 +574,19 @@ function renderReport(rep, jobId) {
       <p class="aud-note">${rep.mirror_dropped_samples} detection samples inside the marked mirror/glass areas were discarded — reflections would otherwise inflate traffic and create phantom looks.</p></div>`;
   }
 
+  const dg = rep.scene3d && rep.scene3d.diagnosis;
+  if (dg && dg.findings && dg.findings.length) {
+    const lvl = { ok: "", weak: "3D active with caveats", failed: "3D withheld — using 2.5D" }[dg.level] || "";
+    const rows = dg.findings.map((f) => {
+      const bad = f.severity === "blocker";
+      return `<div class="diag-row"><span class="diag-sev ${bad ? "bad" : "warn"}">${bad ? "blocker" : "check"}</span>
+        <div><b>${esc(f.what)}</b><small>${esc(f.fix)}</small></div></div>`;
+    }).join("");
+    html += `<div class="wide-chart"><h4>3D calibration assistant <span class="new-tag">SETUP</span>${lvl ? " — " + lvl : ""}</h4>
+      ${rows}
+      <p class="aud-note">Each item lists what the calibration measured and what to change on site. Fixing them raises the confidence score that gates 3D results.</p></div>`;
+  }
+
   if (rep.measurement_health) {
     const h = rep.measurement_health, sm = h.signal_mix || {};
     const chip = (k, v, warn) =>
