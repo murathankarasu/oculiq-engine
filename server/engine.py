@@ -792,7 +792,7 @@ class AttentionEngine:
 
     def process_video(self, path, zones, job, cost_map=None, sample_fps=10,
                       max_seconds=None, crowd_mode="auto", demographics=False,
-                      face_blur=True):
+                      face_blur=True, modules=None):
         cap = cv2.VideoCapture(str(path))
         src_fps = cap.get(cv2.CAP_PROP_FPS) or 25
         n_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
@@ -1099,6 +1099,20 @@ class AttentionEngine:
                 })
             report["lines"] = lines_out
             report["capture_rate"] = lines_out[0]["capture_rate"] if lines_out else None
+            # --- VISIT ANALYTICS: ayri paket, yalnizca acikken hesaplanir ---
+            if (modules or {}).get("visits"):
+                report["visits"] = {
+                    "enabled": True,
+                    "lines": self._visits(line_counters, z_lines, persons,
+                                          valid_pids, zs_att),
+                }
+            else:
+                report["visits"] = {
+                    "enabled": False,
+                    "note": "Visit analytics is a separate package — enable it to get "
+                            "visit duration, engaged vs. bounced visits and the "
+                            "storefront funnel.",
+                }
         self._attach_scene3d(report, sim_frame_img if sim_frame_img is not None else frame,
                              foot_samples, persons, zs_att, job, prebuilt=scene)
         if st["gaze_total"] and isinstance(report.get("scene3d"), dict):
@@ -1593,6 +1607,79 @@ class AttentionEngine:
         if sim is not None:
             report["sim"] = sim
         return json.loads(json.dumps(report, default=lambda o: round(float(o), 3)))
+
+    def _visits(self, line_counters, z_lines, persons, valid_pids, zs_att):
+        """VISIT ANALYTICS (opsiyonel paket) — magaza icin dukkan funnel'i.
+
+        Giris/cikis gecisleri kimlik basina eslestirilerek ZIYARET nesnesi
+        uretilir: ne kadar kaldi, iceride bir seye ilgilendi mi, kisa surede
+        cikip gitti mi ("karar veremedi gitti").
+
+        Durustluk siniri: kimlik yeniden-tanima YOK. Bir kapidan girip
+        digerinden cikan kisi eslesmez; bu ziyaretler UYDURULMAZ, ayri sayilir
+        (`unmatched_enters`). Cok kisa kalislar tek bir esikle degil, dagilimla
+        birlikte raporlanir."""
+        BOUNCE_S = 30.0
+        engaged_pids = {pid for pid, p in persons.items()
+                        if any(v >= self.min_dwell for v in p["dwell"].values())}
+        out = []
+        for z, lc in zip(z_lines, line_counters):
+            _, _, evs = lc.counts(valid_pids)
+            by_pid = defaultdict(list)
+            for (t, pid, d) in evs:
+                by_pid[pid].append((t, d))
+            durations, engaged, bounced = [], 0, 0
+            open_in = 0
+            stray_out = 0
+            for pid, seq in by_pid.items():
+                seq.sort()
+                pending = None
+                for (t, d) in seq:
+                    if d == "in":
+                        if pending is not None:
+                            open_in += 1        # cikissiz onceki giris
+                        pending = t
+                    else:                       # "out"
+                        if pending is None:
+                            stray_out += 1      # analiz baslamadan once iceride
+                            continue
+                        dur = t - pending
+                        pending = None
+                        if dur <= 0:
+                            continue
+                        durations.append(dur)
+                        eng = pid in engaged_pids
+                        if eng:
+                            engaged += 1
+                        elif dur < BOUNCE_S:
+                            bounced += 1
+                if pending is not None:
+                    open_in += 1                # hala iceride (ya da baska kapidan cikti)
+            n = len(durations)
+            row = {
+                "id": z["id"], "label": z["label"],
+                "visits": n,
+                "unmatched_enters": open_in,
+                "unmatched_exits": stray_out,
+                "engaged_visits": engaged,
+                "bounced_visits": bounced,
+                "bounce_threshold_s": BOUNCE_S,
+            }
+            if n:
+                ds = sorted(durations)
+                row["avg_duration_s"] = round(float(np.mean(ds)), 1)
+                row["median_duration_s"] = round(float(np.median(ds)), 1)
+                row["p90_duration_s"] = round(float(np.percentile(ds, 90)), 1)
+                row["engaged_rate"] = round(engaged / n * 100, 1)
+                row["bounce_rate"] = round(bounced / n * 100, 1)
+                # dagilim: ortalamanin sakladigi "yarisi 20 saniyede cikiyor"
+                b = [0, 0, 0, 0, 0]
+                for d in ds:
+                    b[0 if d < 15 else 1 if d < 60 else 2 if d < 180 else
+                      3 if d < 600 else 4] += 1
+                row["duration_histogram"] = b     # <15s, 15-60s, 1-3dk, 3-10dk, 10dk+
+            out.append(row)
+        return out
 
     def _episodes(self, persons, zs_att, report):
         """Kişi×yüzey dikkat epizotları — kimliksiz, model-hazır (server/dataset.py).

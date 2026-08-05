@@ -339,6 +339,7 @@ async function startAnalysis() {
   fd.append("crowd_mode", $("crowdMode").checked ? "on" : "auto");
   fd.append("demographics", $("demoMode").checked ? "on" : "off");
   fd.append("face_blur", $("blurMode").checked ? "on" : "off");
+  fd.append("modules", JSON.stringify({ visits: $("visitsMode").checked }));
 
   let res;
   try {
@@ -572,6 +573,36 @@ function renderReport(rep, jobId) {
   if (rep.mirror_dropped_samples) {
     html += `<div class="wide-chart"><h4>Mirror / glass exclusion <span class="new-tag">NEW</span></h4>
       <p class="aud-note">${rep.mirror_dropped_samples} detection samples inside the marked mirror/glass areas were discarded — reflections would otherwise inflate traffic and create phantom looks.</p></div>`;
+  }
+
+  if (rep.visits) {
+    if (!rep.visits.enabled) {
+      html += `<div class="wide-chart"><h4>Visit analytics <span class="new-tag">ADD-ON</span></h4>
+        <p class="aud-note">${esc(rep.visits.note || "")}</p></div>`;
+    } else {
+      const rows = (rep.visits.lines || []).map((l) => {
+        if (!l.visits) {
+          return `<div class="diag-row"><div><b>${esc(l.label)}</b><small>No matched visits — ${l.unmatched_enters} entries had no exit in this footage.</small></div></div>`;
+        }
+        const hist = (l.duration_histogram || []).map((n, i) => {
+          const lbl = ["&lt;15s", "15–60s", "1–3m", "3–10m", "10m+"][i];
+          const pct = Math.round(n / l.visits * 100);
+          return `<div class="vh-bar"><span>${lbl}</span><i style="width:${pct}%"></i><b>${n}</b></div>`;
+        }).join("");
+        return `<div class="visit-block"><b>${esc(l.label)}</b>
+          <div class="cpm-row">
+            <div class="cpm-box"><div class="k">Visits</div><div class="v">${l.visits}</div></div>
+            <div class="cpm-box"><div class="k">Median stay</div><div class="v">${fmt(l.median_duration_s, 0)}<small>s</small></div></div>
+            <div class="cpm-box"><div class="k">Engaged</div><div class="v">${fmt(l.engaged_rate, 0)}<small>%</small></div></div>
+            <div class="cpm-box hero"><div class="k">Left without engaging &lt;${l.bounce_threshold_s}s</div><div class="v">${fmt(l.bounce_rate, 0)}<small>%</small></div></div>
+          </div>
+          <div class="vh">${hist}</div>
+          <p class="aud-note">Median ${fmt(l.median_duration_s, 0)}s · p90 ${fmt(l.p90_duration_s, 0)}s · avg ${fmt(l.avg_duration_s, 0)}s.
+          ${l.unmatched_enters ? l.unmatched_enters + " entries had no matching exit (still inside, or left by another door) — counted separately, never guessed." : ""}</p>
+        </div>`;
+      }).join("");
+      html += `<div class="wide-chart"><h4>Visit analytics <span class="new-tag">ADD-ON</span> — storefront funnel</h4>${rows}</div>`;
+    }
   }
 
   const dg = rep.scene3d && rep.scene3d.diagnosis;
