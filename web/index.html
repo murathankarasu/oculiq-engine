@@ -105,6 +105,8 @@
             <span class="hint" id="drawHint">click the 4 corners of the ad surface</span>
             <span class="spacer"></span>
             <label class="chk"><input type="checkbox" id="crowdMode" /> Crowded scene <small>tiled multi-scan</small></label>
+            <label class="chk" title="Metric depth is domain-sensitive: use Outdoor for open-air malls, promenades and street-facing units."><span>Scene</span>
+              <select id="sceneType" class="sm"><option value="">Indoor (default)</option><option value="outdoor">Open-air / outdoor</option><option value="auto">Auto-detect</option></select></label>
             <label class="chk"><input type="checkbox" id="demoMode" checked /> Audience insights <small>beta · aggregate gender</small></label>
             <label class="chk"><input type="checkbox" id="blurMode" checked /> Blur faces <small>GDPR</small></label>
             <label class="chk"><input type="checkbox" id="visitsMode" /> Visit analytics <small>add-on · storefront funnel</small></label>
@@ -261,6 +263,6 @@
     </div>
   </div>
 
-  <script type="module" src="app.js?v=22"></script>
+  <script type="module" src="app.js?v=23"></script>
 </body>
 </html>

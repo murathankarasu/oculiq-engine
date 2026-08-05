@@ -65,8 +65,13 @@ Every measurement carries:
   gaps clamped to [0.01 s, 0.5 s].
 - Detection: YOLO11-pose-x (single pass, `imgsz 960`) or hybrid crowd mode
   (RTMO + 2×2 overlapping tiles, IoS-NMS merge) on ≥1080p or ≥10 people.
-- 3D depth: Depth Anything V2 Metric, **Indoor** variant by default (retail
-  scenes are indoor); `OCULIQ_DEPTH_MODEL=outdoor` for DOOH/open-air. Built once
+- 3D depth: Depth Anything V2 Metric. The variant is **per analysis**
+  (`scene_type`): `indoor` (default, enclosed malls and shops), `outdoor`
+  (open-air malls, promenades, street-facing units) or `auto`, which runs both
+  and keeps the one with the higher self-verifying confidence. The choice
+  matters: on an indoor scene the wrong variant drops confidence from 100% to
+  17%, at which point 3D results are withheld. `OCULIQ_DEPTH_MODEL` sets the
+  default. Built once
   per job from the **per-pixel median of up to 3 frames** (~0.8 s apart) so a
   passer-by can't poison the calibration; gated by the reliability check (§3) —
   falls back to 2.5D if unreliable. Surface depth is **ground-anchored**: when the

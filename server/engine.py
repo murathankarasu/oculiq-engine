@@ -792,7 +792,7 @@ class AttentionEngine:
 
     def process_video(self, path, zones, job, cost_map=None, sample_fps=10,
                       max_seconds=None, crowd_mode="auto", demographics=False,
-                      face_blur=True, modules=None):
+                      face_blur=True, modules=None, scene_type=None):
         cap = cv2.VideoCapture(str(path))
         src_fps = cap.get(cv2.CAP_PROP_FPS) or 25
         n_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
@@ -958,7 +958,8 @@ class AttentionEngine:
                     job["status"] = "scene-3d"
                     _jlog(job, f"Reconstructing 3D scene (metric depth, "
                                f"{len(depth_frames)}-frame median)…")
-                    scene = SceneModel().build(depth_frames, foot_samples)
+                    scene = SceneModel().build(depth_frames, foot_samples,
+                                               scene_type=scene_type)
                     scene_ok = scene.reliable()   # GÜVEN KAPISI: düşükse 3D devre dışı
                     if scene.enabled:
                         hm = scene.height_mean
@@ -1114,7 +1115,8 @@ class AttentionEngine:
                             "storefront funnel.",
                 }
         self._attach_scene3d(report, sim_frame_img if sim_frame_img is not None else frame,
-                             foot_samples, persons, zs_att, job, prebuilt=scene)
+                             foot_samples, persons, zs_att, job, prebuilt=scene,
+                             scene_type=scene_type)
         if st["gaze_total"] and isinstance(report.get("scene3d"), dict):
             report["scene3d"]["gaze3d_pct"] = round(st["gaze3d_n"] / st["gaze_total"] * 100, 1)
         # ölçüm sağlığı (Spec §10): zayıf sahne gizlenmez, raporlanır
@@ -1146,7 +1148,7 @@ class AttentionEngine:
 
     # ---------- image ----------
     def process_image(self, path, zones, job, cost_map=None, crowd_mode="auto",
-                      demographics=False, face_blur=True):
+                      demographics=False, face_blur=True, scene_type=None):
         frame = cv2.imread(str(path))
         H, W = frame.shape[:2]
         tiled = self._use_tiles(W, H, crowd_mode)
@@ -1223,7 +1225,8 @@ class AttentionEngine:
         for i, d in enumerate(dets):  # fotoda kişi ayağı = tek örnek
             if i in persons and i < len(foot_samples):
                 persons[i]["foot_sum"] = [foot_samples[i][0], foot_samples[i][1], 1]
-        self._attach_scene3d(report, frame, foot_samples, persons, zs_att, job)
+        self._attach_scene3d(report, frame, foot_samples, persons, zs_att, job,
+                             scene_type=scene_type)
         if demographics and persons:
             id_persons = {d["id"]: persons[i] for i, d in enumerate(dets)}
             if self._gender_pass(frame, dets, id_persons):
@@ -1233,7 +1236,7 @@ class AttentionEngine:
         try:
             from server.scene3d import SceneModel
             if report["scene3d"].get("enabled") and foot_samples:
-                sc = SceneModel().build(frame, foot_samples)
+                sc = SceneModel().build(frame, foot_samples, scene_type=scene_type)
                 if sc.enabled and sc.reliable():
                     sc._grid = sc.grid_segments()
                     zq = {z["id"]: sc.zone_quad(z) for z in zs_att}
@@ -1285,7 +1288,8 @@ class AttentionEngine:
             return False
 
     # ---------- scene3d ----------
-    def _attach_scene3d(self, report, frame, foot_samples, persons, zs, job, prebuilt=None):
+    def _attach_scene3d(self, report, frame, foot_samples, persons, zs, job,
+                        prebuilt=None, scene_type=None):
         """3D sahne kalibrasyonu: derinlik + odak + zemin düzlemi + bölge boyutu +
         izleme mesafeleri. Başarısızlıkta rapor sadece enabled:false taşır."""
         if frame is None or not foot_samples:
@@ -1297,7 +1301,7 @@ class AttentionEngine:
             if prebuilt is not None and prebuilt.enabled:
                 sm = prebuilt._recalibrate(foot_samples)  # tüm örneklerle güveni tazele (ucuz)
             else:
-                sm = SceneModel().build(frame, foot_samples)
+                sm = SceneModel().build(frame, foot_samples, scene_type=scene_type)
             report["scene3d"] = sm.state()
             if not sm.enabled:
                 return

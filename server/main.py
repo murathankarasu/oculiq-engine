@@ -59,7 +59,7 @@ def job_log(job, msg, level="info"):
 
 def _run(job_id: str, path: Path, zones: list, cost_map: dict, is_video: bool,
          sample_fps: int, crowd_mode: str, demographics: bool, face_blur: bool,
-         modules=None):
+         modules=None, scene_type=None):
     job = jobs[job_id]
     job["id"] = job_id
     t_start = time.time()
@@ -74,10 +74,11 @@ def _run(job_id: str, path: Path, zones: list, cost_map: dict, is_video: bool,
             report = eng.process_video(path, zones, job, cost_map,
                                        sample_fps=sample_fps, crowd_mode=crowd_mode,
                                        demographics=demographics, face_blur=face_blur,
-                                       modules=modules)
+                                       modules=modules, scene_type=scene_type)
         else:
             report = eng.process_image(path, zones, job, cost_map, crowd_mode=crowd_mode,
-                                       demographics=demographics, face_blur=face_blur)
+                                       demographics=demographics, face_blur=face_blur,
+                                       scene_type=scene_type)
         job["report"] = report
         job["progress"] = 100
         job["status"] = "done"
@@ -136,7 +137,8 @@ def _get_job(job_id: str):
 async def analyze(file: UploadFile = File(...), zones: str = Form(...),
                   costs: str = Form("{}"), sample_fps: int = Form(10),
                   crowd_mode: str = Form("auto"), demographics: str = Form("off"),
-                  face_blur: str = Form("on"), modules: str = Form("{}")):
+                  face_blur: str = Form("on"), modules: str = Form("{}"),
+                  scene_type: str = Form("")):
     zs = json.loads(zones)
     if not zs:
         raise HTTPException(400, "at least one zone required")
@@ -153,7 +155,7 @@ async def analyze(file: UploadFile = File(...), zones: str = Form(...),
     threading.Thread(target=_run,
                      args=(job_id, path, zs, json.loads(costs), is_video, sample_fps,
                            crowd_mode, demographics == "on", face_blur != "off",
-                           json.loads(modules or "{}")),
+                           json.loads(modules or "{}"), scene_type or None),
                      daemon=True).start()
     return {"job_id": job_id}
 

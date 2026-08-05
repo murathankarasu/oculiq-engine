@@ -340,6 +340,7 @@ async function startAnalysis() {
   fd.append("demographics", $("demoMode").checked ? "on" : "off");
   fd.append("face_blur", $("blurMode").checked ? "on" : "off");
   fd.append("modules", JSON.stringify({ visits: $("visitsMode").checked }));
+  fd.append("scene_type", $("sceneType").value);
 
   let res;
   try {

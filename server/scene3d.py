@@ -40,9 +40,17 @@ if DEPTH_VARIANT not in _DEPTH_MODELS:
 DEPTH_MODEL = _DEPTH_MODELS[DEPTH_VARIANT]
 
 
-def _depth_pipe():
-    global _pipe
-    if _pipe is None:
+_pipes = {}
+
+
+def _depth_pipe(variant=None):
+    """Derinlik modeli — varyant basina onbellege alinir.
+    Kapali AVM/magaza icin `indoor`, ACIK ALAN AVM / dis mekan icin `outdoor`:
+    metrik derinlik domaine duyarlidir, yanlis varyant olcegi kaydirir."""
+    v = (variant or DEPTH_VARIANT).lower()
+    if v not in _DEPTH_MODELS:
+        v = DEPTH_VARIANT
+    if v not in _pipes:
         from transformers import pipeline
         try:
             import torch
@@ -50,8 +58,8 @@ def _depth_pipe():
                      (0 if torch.cuda.is_available() else -1)
         except Exception:
             device = -1
-        _pipe = pipeline("depth-estimation", model=DEPTH_MODEL, device=device)
-    return _pipe
+        _pipes[v] = pipeline("depth-estimation", model=_DEPTH_MODELS[v], device=device)
+    return _pipes[v]
 
 
 class SceneModel:
@@ -73,8 +81,33 @@ class SceneModel:
         self.note = ""
 
     # ---------- kurulum ----------
-    def build(self, frame_bgr, person_samples):
-        """frame_bgr: temiz kare (BGR). person_samples: [(foot_u, foot_v, h_px), ...]"""
+    def build(self, frame_bgr, person_samples, scene_type=None):
+        """frame_bgr: temiz kare (BGR). person_samples: [(foot_u, foot_v, h_px), ...]
+        scene_type: 'indoor' | 'outdoor' | 'auto' | None (varsayilan).
+
+        'auto': her iki metrik derinlik varyanti denenir ve KENDINI DOGRULAYAN
+        guven skoru yuksek olan secilir. Bir AVM'de hem kapali magaza hem acik
+        alan kameralari bulunur; operator yanlis isaretlerse tum 3D bozulur
+        (olculdu: ic mekan sahnesinde yanlis varyant %100 -> %17 guven). Maliyet
+        is basina bir ek derinlik gecisidir."""
+        want = (scene_type or DEPTH_VARIANT).lower()
+        if want == "auto":
+            best, best_conf = None, -1.0
+            for v in ("indoor", "outdoor"):
+                m = SceneModel()
+                m.scene_type = v
+                try:
+                    m._build(frame_bgr, person_samples)
+                except Exception as e:
+                    m.enabled = False
+                    m.note = f"scene3d unavailable: {type(e).__name__}: {e}"
+                c = m.confidence if m.enabled else -1.0
+                if c > best_conf:
+                    best, best_conf = m, c
+            if best is not None:
+                best.scene_type_auto = True
+                return best
+        self.scene_type = want if want in _DEPTH_MODELS else DEPTH_VARIANT
         try:
             self._build(frame_bgr, person_samples)
         except Exception as e:
@@ -96,7 +129,7 @@ class SceneModel:
         maps = []
         for fb in frames:
             img = Image.fromarray(cv2.cvtColor(fb, cv2.COLOR_BGR2RGB))
-            out = _depth_pipe()(img)
+            out = _depth_pipe(getattr(self, 'scene_type', None))(img)
             di = np.asarray(out["predicted_depth"], dtype=np.float32)
             if di.shape != (self.H, self.W):
                 di = cv2.resize(di, (self.W, self.H), interpolation=cv2.INTER_LINEAR)
@@ -842,7 +875,7 @@ class SceneModel:
             return {"enabled": False, "note": self.note,
                     "diagnosis": self.diagnose()}
         s = {"enabled": True,
-             "model": f"Depth Anything V2 metric ({DEPTH_VARIANT}, small)"
+             "model": f"Depth Anything V2 metric ({getattr(self, 'scene_type', DEPTH_VARIANT)}, small)"
                       + (f", {self.depth_frames_used}-frame median"
                          if getattr(self, "depth_frames_used", 1) > 1 else ""),
              "focal_px": round(self.f, 1) if self.f else None,
@@ -859,5 +892,7 @@ class SceneModel:
             s["camera_tilt_deg"] = self.tilt_deg
         if self.note:
             s["note"] = self.note
+        if getattr(self, "scene_type_auto", False):
+            s["scene_type_auto"] = True
         s["diagnosis"] = self.diagnose()
         return s
