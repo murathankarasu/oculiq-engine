@@ -592,6 +592,22 @@ class AttentionEngine:
             return False
         return W * H >= 1920 * 1080  # auto: hi-res CCTV -> tiled
 
+    def _should_tile(self, n_people, tiled_now, mode, W, H):
+        """Kalabalik taramasi DINAMIK karar (auto modunda).
+
+        Onceden karar yalnizca ilk karede verilirdi: sakin baslayip sonra
+        kalabalikllasan bir sahnede (AVM'de kural, istisna degil) uzak/kucuk
+        insanlar bir daha taranmiyordu. Artik her kontrolde yeniden bakilir.
+        Histerezis: 8 kisiyle acilir, 5'in altina inince kapanir — esik
+        civarinda surekli acilip kapanma (ve olcum dalgalanmasi) olmaz."""
+        if mode == "on":
+            return True
+        if mode == "off":
+            return False
+        if tiled_now:
+            return n_people >= 5
+        return n_people >= 8 or W * H >= 1920 * 1080
+
     # ---------- video ----------
     def _step_frame(self, st, dets, t, dtf, b):
         """Kare-başı ölçüm çekirdeği — batch (process_video) ve canlı (stream.py)
@@ -880,7 +896,6 @@ class AttentionEngine:
 
         fi = 0
         t0 = time.time()
-        first_checked = False
         while True:
             ok, frame = cap.read()
             if not ok:
@@ -905,13 +920,15 @@ class AttentionEngine:
             dets, _md = self._drop_mirrored(dets, z_mirror)
             mirror_dropped += _md
 
-            # auto-upgrade: crowded scene detected -> switch to tiled multi-scan
-            if not first_checked:
-                first_checked = True
-                if not tiled and crowd_mode == "auto" and len(dets) >= 10:
-                    tiled = True
-                    _jlog(job, f"{len(dets)} people in first frame — auto-switching to tiled multi-scan")
-                    dets = self._detect_frame(frame, tiled, tracker)
+            # kalabalik taramasi: her karede yeniden degerlendirilir (sahne
+            # sakin baslayip kalabalikllasabilir; eskiden yalnizca ilk kare bakilirdi)
+            want_tiles = self._should_tile(len(dets), tiled, crowd_mode, W, H)
+            if want_tiles != tiled:
+                tiled = want_tiles
+                _jlog(job, f"{len(dets)} people — "
+                           f"{'enabling' if tiled else 'disabling'} tiled multi-scan")
+                if tiled:      # acilista kareyi yeniden tara ki kimse kacmasin
+                    dets = self._detect_frame(frame, True, tracker)
                     dets, _md = self._drop_mirrored(dets, z_mirror)
                     mirror_dropped += _md
 
@@ -1447,7 +1464,12 @@ class AttentionEngine:
                 ph = p.get("h_sum", 0.0) / max(p.get("frames", 1), 1)
                 if qh <= 0 or ph <= 0 or not (0.75 <= ph / qh <= 1.33):
                     continue
-                if math.dist(q["last_pos"], p["first_pos"]) > 0.9 * max(qh, ph):
+                # Arama yaricapi BOSLUK SURESIYLE olceklenir: kalabalik
+                # taramasinda kimlik daha sik kopar ve kisi bu arada yol alir;
+                # sabit yaricap parcalari birlestiremiyordu (olculdu: kalabalik
+                # sahnede dikis 12 -> 2, traffic 18 -> 30 sisti).
+                if math.dist(q["last_pos"], p["first_pos"]) > \
+                        (0.9 + 1.6 * gap) * max(qh, ph):
                     continue
                 if best is None or q["last_t"] > best[1]["last_t"]:
                     best = (qid, q)

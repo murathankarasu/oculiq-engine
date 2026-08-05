@@ -154,6 +154,8 @@ class StreamWorker(threading.Thread):
                    "gaze3d_n": 0, "gaze_total": 0, "wrist_samples": 0,
                    "record_rays": False}
         self.win_samples = 0
+        if not hasattr(self, "_tiled"):
+            self._tiled, self._last_dets = False, []
         if not hasattr(self, "_scene"):
             self._scene, self._zquads = None, {}
             self._scene_tried, self._scene_state = False, None
@@ -252,7 +254,8 @@ class StreamWorker(threading.Thread):
                           cost_map=self.cam.get("costs") or {},
                           still=False, elapsed=elapsed, sim=None)
         rep["mode"] = "live"
-        rep["scan_mode"] = "live single-pass"
+        rep["scan_mode"] = ("live tiled multi-scan (crowd)"
+                            if getattr(self, "_tiled", False) else "live single-pass")
         rep["window_started"] = int(self.started_ts)
         if self._scene_state:
             rep["scene3d"] = self._scene_state
@@ -444,7 +447,15 @@ class StreamWorker(threading.Thread):
                     prev_cal = self.eng._cal
                     self.eng._cal = self.my_cal
                     try:
-                        dets = self.eng._detect_frame(frame, False, self.tracker)
+                        # KALABALIK TARAMASI canlida da calisir: AVM'de kalabalik
+                        # kuraldir. Karar dinamiktir (8 kisiyle acilir, 5'in
+                        # altinda kapanir) — sabit False oldugu icin canli mod
+                        # uzak/kucuk insanlari hic taramiyordu.
+                        self._tiled = self.eng._should_tile(
+                            len(getattr(self, "_last_dets", []) or []), self._tiled,
+                            cam.get("crowd_mode", "auto"), W, H)
+                        dets = self.eng._detect_frame(frame, self._tiled, self.tracker)
+                        self._last_dets = dets
                     finally:
                         self.eng._cal = prev_cal
                 b = int(t // 2) * 2

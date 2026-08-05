@@ -64,7 +64,11 @@ Every measurement carries:
 - All durations accumulate with **real frame timestamps** (VFR-safe), frame
   gaps clamped to [0.01 s, 0.5 s].
 - Detection: YOLO11-pose-x (single pass, `imgsz 960`) or hybrid crowd mode
-  (RTMO + 2×2 overlapping tiles, IoS-NMS merge) on ≥1080p or ≥10 people.
+  (RTMO + 2×2 overlapping tiles, IoS-NMS merge). In `auto` the choice is
+  **re-evaluated continuously**, in live and batch alike: tiling engages at ≥8
+  people and disengages below 5 (hysteresis), and always runs at ≥1080p. A scene
+  that starts quiet and fills up — the norm in a mall — is no longer scanned as
+  if it were empty.
 - 3D depth: Depth Anything V2 Metric. The variant is **per analysis**
   (`scene_type`): `indoor` (default, enclosed malls and shops), `outdoor`
   (open-air malls, promenades, street-facing units) or `auto`, which runs both
