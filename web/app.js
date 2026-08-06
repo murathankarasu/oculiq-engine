@@ -598,6 +598,9 @@ function renderReport(rep, jobId) {
             <div class="cpm-box hero"><div class="k">Left without engaging &lt;${l.bounce_threshold_s}s</div><div class="v">${fmt(l.bounce_rate, 0)}<small>%</small></div></div>
           </div>
           <div class="vh">${hist}</div>
+          ${(l.window_conversion || []).map((w) => `<div class="wconv"><b>${esc(w.label)}</b>
+            <span>${w.lookers} looked → ${w.entered_after_looking} came in</span>
+            <i>${fmt(w.conversion_rate, 0)}%</i></div>`).join("")}
           <p class="aud-note">Median ${fmt(l.median_duration_s, 0)}s · p90 ${fmt(l.p90_duration_s, 0)}s · avg ${fmt(l.avg_duration_s, 0)}s.
           ${l.unmatched_enters ? l.unmatched_enters + " entries had no matching exit (still inside, or left by another door) — counted separately, never guessed." : ""}</p>
         </div>`;
@@ -1254,6 +1257,7 @@ function zoneReport(z, still) {
       ${still ? "" : `<div class="mcard" title="${GLOSS["Stopping power"]}"><div class="k">Stopping power <span class="new-tag">NEW</span></div><div class="v">${fmt(z.stopping_power, 0)}<small>% slowdown</small></div></div>`}
       ${!still && z.reaches != null ? `<div class="mcard" title="A wrist keypoint inside the shelf zone in ≥3 consecutive samples (Spec v1.0)."><div class="k">Reaches <span class="new-tag">NEW</span></div><div class="v">${z.reaches}</div></div>` : ""}
       ${!still && z.reach_rate != null ? `<div class="mcard" title="Share of lookers who reached toward the shelf."><div class="k">Reach rate</div><div class="v">${fmt(z.reach_rate, 1)}<small>% of lookers</small></div></div>` : ""}
+      ${!still && z.hesitations != null ? `<div class="mcard star" title="Looked for ${z.hesitation_criteria.min_dwell_s}s+, came back ${z.hesitation_criteria.min_glances}+ times, but never reached for the product — interested, not convinced."><div class="k">Hesitation <span class="new-tag">NEW</span></div><div class="v">${fmt(z.hesitation_rate, 0)}<small>% · ${z.hesitations} people</small></div></div>` : ""}
       ${z.size_m ? `<div class="mcard" title="${GLOSS["Zone size"]}${z.size_source === "ground-anchored" ? " Measured against the calibrated ground plane because the depth map disagreed." : ""}"><div class="k">Zone size <span class="new-tag">3D</span></div><div class="v">${fmt(z.size_m[0], 1)}×${fmt(z.size_m[1], 1)}<small>m${z.surface_tilt_deg != null ? " · " + fmt(z.surface_tilt_deg, 0) + "° tilt" : ""}${z.size_source === "ground-anchored" ? " · ground-anchored" : ""}</small></div></div>` : ""}
       ${z.size_note ? `<div class="mcard" title="A surface size that isn't physically plausible is withheld rather than reported (Spec v1.0 §10)."><div class="k">Zone size <span class="new-tag">3D</span></div><div class="v" style="font-size:13px;line-height:1.3">${esc(z.size_note)}</div></div>` : ""}
       ${z.avg_view_distance_m != null ? `<div class="mcard" title="${GLOSS["View distance"]}"><div class="k">Avg view distance <span class="new-tag">3D</span></div><div class="v">${fmt(z.avg_view_distance_m, 1)}<small>m</small></div></div>` : ""}

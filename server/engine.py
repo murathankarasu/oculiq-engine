@@ -1619,6 +1619,22 @@ class AttentionEngine:
                 zo["reach_evidence"] = [{"pid": pid_, "t": tt}
                                         for pid_, tt in sorted(evs, key=lambda e: e[1])[:8]]
 
+                # TEREDDUT (Faz B): uzun sure bakti, birden fazla kez donup
+                # bakti, ama URUNE UZANMADI. "Ilgilendi ama ikna olmadi"nin
+                # olculebilir hali — footfall sayan hicbir urun bunu veremez ve
+                # dogrudan bir merchandising/fiyat aksiyonuna baglanir.
+                HES_DWELL, HES_GLANCES = 3.0, 2
+                reached_pids = {pid_ for pid_, _ in evs}
+                hes = [pid_ for pid_, pp in persons.items()
+                       if pp["dwell"][zid] >= HES_DWELL
+                       and pp["episodes"][zid] >= HES_GLANCES
+                       and pid_ not in reached_pids]
+                zo["hesitations"] = len(hes)
+                zo["hesitation_rate"] = round(len(hes) / imp * 100, 1) if imp else 0.0
+                zo["hesitation_criteria"] = {"min_dwell_s": HES_DWELL,
+                                             "min_glances": HES_GLANCES,
+                                             "no_reach": True}
+
         report = {
             "spec": "1.0",
             "method": "orientation-based attention (head-pose primary, on-device)",
@@ -1704,6 +1720,29 @@ class AttentionEngine:
                     b[0 if d < 15 else 1 if d < 60 else 2 if d < 180 else
                       3 if d < 600 else 4] += 1
                 row["duration_histogram"] = b     # <15s, 15-60s, 1-3dk, 3-10dk, 10dk+
+            # VITRIN DONUSUMU (Faz B): vitrine BAKANLARIN kacI iceri girdi?
+            # Dusuk bakis = yanlis vitrin. Yuksek bakis + dusuk giris = vitrin
+            # verdigi sozu tutmuyor. Bu ayrimi bugun kimse olcemiyor; footfall
+            # sadece "kac kisi girdi" der, nedenini soylemez.
+            windows = [z for z in zs_att if z["type"] in ("window", "billboard", "screen")]
+            if windows:
+                entered = {pid for (t, pid, d) in evs if d == "in"}
+                conv = []
+                for wz in windows:
+                    wid = wz["id"]
+                    lookers = {pid for pid, p in persons.items()
+                               if p["dwell"][wid] >= self.min_dwell}
+                    if not lookers:
+                        continue
+                    came = lookers & entered
+                    conv.append({
+                        "id": wid, "label": wz["label"],
+                        "lookers": len(lookers),
+                        "entered_after_looking": len(came),
+                        "conversion_rate": round(len(came) / len(lookers) * 100, 1),
+                    })
+                if conv:
+                    row["window_conversion"] = conv
             out.append(row)
         return out
 

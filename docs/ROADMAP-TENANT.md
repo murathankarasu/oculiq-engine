@@ -50,12 +50,12 @@ reported as such, never silently guessed.
 Footfall products stop at Phase A. This is where the attention engine earns its
 price, and it is why we can charge a shop instead of a facilities manager.
 
-- **Window conversion** — of the people who *looked* at the window, how many came
-  in? Low looks = wrong display. High looks but low entry = the window promises
-  something the shop doesn't deliver. No one can currently measure this split.
-- **Hesitation** — long dwell at a shelf, repeated glances, **no reach**. The
-  clearest "interested but not convinced" signal we can produce, and it maps
-  directly to a merchandising or pricing action.
+- **Window conversion** — SHIPPED. Of the people who *looked* at the window, how
+  many came in? Low looks = wrong display. High looks but low entry = the window
+  promises something the shop doesn't deliver.
+- **Hesitation** — SHIPPED. Long dwell (≥3 s), repeated glances (≥2), **no
+  reach**. The clearest "interested but not convinced" signal we can produce, and
+  it maps directly to a merchandising or pricing action.
 - **Abandonment point** — the last surface engaged before a short-visit exit.
   Tells the shop *where* it lost the customer, not just that it did.
 - **Reach-to-dwell ratio** — engagement quality per surface; separates a display

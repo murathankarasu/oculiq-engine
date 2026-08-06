@@ -731,3 +731,8 @@ button.danger { border-radius: 999px; }
 .vh-bar span { width: 52px; flex: none; }
 .vh-bar i { height: 8px; background: var(--accent); border-radius: 2px; min-width: 2px; }
 .vh-bar b { color: var(--text); font-size: 11px; }
+
+.wconv { display: flex; align-items: center; gap: 10px; margin-top: 8px; font-size: 12.5px; }
+.wconv b { font-weight: 600; }
+.wconv span { color: var(--muted); }
+.wconv i { margin-left: auto; font-style: normal; font-weight: 700; color: var(--accent); font-size: 15px; }

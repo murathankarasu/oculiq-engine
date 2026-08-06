@@ -44,6 +44,8 @@ Every measurement carries:
 | **Stopping power** | Mean speed drop while looking: `max(0, 1 − v_look/v_all) × 100` (speed in body-heights/sec). |
 | **Enter / Exit (line)** | A tracked person's foot point crossing a declared line, with hysteresis (§5). Direction of the line's arrow = **in**. |
 | **Capture rate** | enters ÷ traffic seen in frame (share of passers-by that entered). |
+| **Hesitation** | A looker with dwell ≥ 3 s and ≥ 2 separate glances who never reached toward the surface (`shelf`/`display` only). Reported as count and share of lookers — "interested, not convinced". |
+| **Window conversion** | Of the people who looked at a `window`/`billboard`/`screen` surface, the share who then crossed an entrance line inward (visit-analytics package). |
 | **Reach** | A wrist keypoint inside a `shelf` surface, keypoint confidence ≥ 0.35, in ≥ 3 consecutive samples. Reported only when keypoint quality permits; otherwise the report states "no reach signal". |
 
 ## 3. Attention cone
