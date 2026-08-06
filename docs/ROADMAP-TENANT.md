@@ -56,10 +56,13 @@ price, and it is why we can charge a shop instead of a facilities manager.
 - **Hesitation** — SHIPPED. Long dwell (≥3 s), repeated glances (≥2), **no
   reach**. The clearest "interested but not convinced" signal we can produce, and
   it maps directly to a merchandising or pricing action.
-- **Abandonment point** — the last surface engaged before a short-visit exit.
-  Tells the shop *where* it lost the customer, not just that it did.
-- **Reach-to-dwell ratio** — engagement quality per surface; separates a display
-  people admire from one people touch.
+- **Abandonment point** — SHIPPED. The last surface engaged before the exit,
+  reported per surface. Tells the shop *where* it lost the customer, not just
+  that it did.
+- **Reach-to-dwell ratio** — DROPPED as a separate metric. `reach_rate` (share of
+  lookers who reached) already separates a display people admire from one they
+  touch, and `hesitation` covers the "looked long, never reached" case. A third
+  ratio over the same two numbers would add a figure, not information.
 
 ---
 

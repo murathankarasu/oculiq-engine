@@ -598,6 +598,8 @@ function renderReport(rep, jobId) {
             <div class="cpm-box hero"><div class="k">Left without engaging &lt;${l.bounce_threshold_s}s</div><div class="v">${fmt(l.bounce_rate, 0)}<small>%</small></div></div>
           </div>
           <div class="vh">${hist}</div>
+          ${l.last_surface_before_exit ? `<div class="wconv"><b>Where visits ended</b>
+            <span>${l.last_surface_before_exit.slice(0,3).map((a) => esc(a.label) + " (" + a.visits + ")").join(" · ")}</span></div>` : ""}
           ${(l.window_conversion || []).map((w) => `<div class="wconv"><b>${esc(w.label)}</b>
             <span>${w.lookers} looked → ${w.entered_after_looking} came in</span>
             <i>${fmt(w.conversion_rate, 0)}%</i></div>`).join("")}

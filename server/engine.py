@@ -1671,6 +1671,7 @@ class AttentionEngine:
             for (t, pid, d) in evs:
                 by_pid[pid].append((t, d))
             durations, engaged, bounced = [], 0, 0
+            abandon = {}
             open_in = 0
             stray_out = 0
             for pid, seq in by_pid.items():
@@ -1695,6 +1696,15 @@ class AttentionEngine:
                             engaged += 1
                         elif dur < BOUNCE_S:
                             bounced += 1
+                        # VAZGECME NOKTASI: cikistan once en son ilgilenilen yuzey.
+                        # Magazaya "nerede kaybettin"i soyler; "kaybettin"i degil.
+                        last_zid, last_end = None, -1.0
+                        for zz in zs_att:
+                            for (a, b2) in persons[pid].get("intervals", {}).get(zz["id"], []):
+                                if b2 <= t and b2 > last_end:
+                                    last_end, last_zid = b2, zz["id"]
+                        if last_zid is not None:
+                            abandon[last_zid] = abandon.get(last_zid, 0) + 1
                 if pending is not None:
                     open_in += 1                # hala iceride (ya da baska kapidan cikti)
             n = len(durations)
@@ -1707,6 +1717,11 @@ class AttentionEngine:
                 "bounced_visits": bounced,
                 "bounce_threshold_s": BOUNCE_S,
             }
+            if abandon:
+                labels = {z["id"]: z["label"] for z in zs_att}
+                row["last_surface_before_exit"] = [
+                    {"id": k, "label": labels.get(k, str(k)), "visits": v}
+                    for k, v in sorted(abandon.items(), key=lambda kv: -kv[1])]
             if n:
                 ds = sorted(durations)
                 row["avg_duration_s"] = round(float(np.mean(ds)), 1)
@@ -1724,7 +1739,7 @@ class AttentionEngine:
             # Dusuk bakis = yanlis vitrin. Yuksek bakis + dusuk giris = vitrin
             # verdigi sozu tutmuyor. Bu ayrimi bugun kimse olcemiyor; footfall
             # sadece "kac kisi girdi" der, nedenini soylemez.
-            windows = [z for z in zs_att if z["type"] in ("window", "billboard", "screen")]
+            windows = [z for z in zs_att if z.get("type") in ("window", "billboard", "screen")]
             if windows:
                 entered = {pid for (t, pid, d) in evs if d == "in"}
                 conv = []
