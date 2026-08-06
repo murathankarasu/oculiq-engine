@@ -1403,6 +1403,7 @@ async function lvRefresh() {
         ${c.status === "live"
           ? `<button class="sm" data-act="stop">Stop</button>`
           : `<button class="sm" data-act="start" ${!(c.zones || []).length ? "disabled title='draw zones first'" : ""}>Start</button>`}
+        <button class="sm" data-act="report">Report</button>
         <button class="sm" data-act="zones">Zones</button>
         <button class="sm" data-act="del" title="remove">×</button>
       </div>
@@ -1428,6 +1429,60 @@ async function lvAction(btn) {
   }
   if (act === "zones") lvOpenModal(lvCams.find((c) => c.id === id));
   if (act === "watch") lvWatch(lvCams.find((c) => c.id === id));
+  if (act === "report") lvFullReport(lvCams.find((c) => c.id === id));
+}
+
+/* -- canli tam rapor: video analiziyle ayni veri, ayni render -- */
+async function lvFullReport(cam) {
+  const box = $("lvReportBox");
+  $("lvrName").textContent = cam.name || cam.id;
+  box.innerHTML = '<p class="aud-note">Loading current window…</p>';
+  $("lvReportModal").classList.remove("hidden");
+  try {
+    const rep = await (await fetch(`/api/cameras/${cam.id}/report`)).json();
+    if (rep.detail) { box.innerHTML = `<p class="aud-note">${esc(rep.detail)}</p>`; return; }
+    box.innerHTML = lvReportHtml(rep);
+  } catch (e) {
+    box.innerHTML = '<p class="aud-note">Could not load the live report.</p>';
+  }
+}
+$("lvrClose").onclick = () => $("lvReportModal").classList.add("hidden");
+
+function lvReportHtml(rep) {
+  const mh = rep.measurement_health || {};
+  const kpi = (k, v) => `<div class="kpi"><div class="k">${k}</div><div class="v">${v}</div></div>`;
+  let h = `<div class="kpi-grid">
+    ${kpi("Passersby (traffic)", rep.traffic)}
+    ${rep.capture_rate != null ? kpi("Capture rate", fmt(rep.capture_rate, 1) + "<small>%</small>") : ""}
+    ${kpi("Window", Math.round((rep.duration || 0) / 60) + "<small> min</small>")}
+    ${kpi("Scan mode", `<small>${esc(rep.scan_mode || "")}</small>`)}
+  </div>`;
+  for (const z of rep.zones || []) {
+    h += `<div class="visit-block"><b>${esc(z.label)}</b> <small style="color:var(--muted)">${esc(z.type)}</small>
+      <div class="cpm-row">
+        <div class="cpm-box"><div class="k">Attention rate</div><div class="v">${fmt(z.attention_rate, 1)}<small>%</small></div></div>
+        <div class="cpm-box"><div class="k">Impressions</div><div class="v">${z.impressions}</div></div>
+        <div class="cpm-box"><div class="k">AQS</div><div class="v">${fmt(z.aqs, 0)}</div></div>
+        ${z.hesitations != null ? `<div class="cpm-box hero"><div class="k">Hesitation</div><div class="v">${fmt(z.hesitation_rate, 0)}<small>%</small></div></div>` : ""}
+      </div>
+      <p class="aud-note">${z.size_m ? `Surface ${fmt(z.size_m[0],1)}×${fmt(z.size_m[1],1)} m @ ${z.zone_depth_m} m${z.size_source === "ground-anchored" ? " (ground-anchored)" : ""} · ` : ""}
+        avg dwell ${fmt(z.avg_dwell, 1)}s · TTFL ${z.time_to_first_look != null ? fmt(z.time_to_first_look, 1) + "s" : "—"}${z.reaches != null ? " · " + z.reaches + " reaches" : ""}</p>
+    </div>`;
+  }
+  for (const l of rep.lines || []) {
+    h += `<div class="wconv"><b>${esc(l.label)}</b><span>${l.enters} in · ${l.exits} out</span><i>${fmt(l.capture_rate, 0)}%</i></div>`;
+  }
+  if (rep.visits && rep.visits.enabled) {
+    for (const l of rep.visits.lines || []) {
+      h += `<div class="wconv"><b>Visits — ${esc(l.label)}</b><span>${l.visits} matched · ${l.unmatched_enters} unmatched${l.bounce_rate != null ? " · " + fmt(l.bounce_rate, 0) + "% left <30s" : ""}</span></div>`;
+    }
+  }
+  h += `<div class="wide-chart" style="margin-top:12px"><h4>Measurement health</h4>
+    <div class="cam-live"><span class="lv-kpi"><b>${fmt(mh.direction_share, 0)}%</b> <small>direction signal</small></span>
+      <span class="lv-kpi"><b>${fmt(mh.gaze3d_pct, 0)}%</b> <small>3D gaze path</small></span>
+      <span class="lv-kpi"><b>${fmt(mh.avg_det_conf, 2)}</b> <small>detector conf</small></span></div>
+    <p class="aud-note">${esc(rep.live_limits || "")}</p></div>`;
+  return h;
 }
 
 /* -- live watch modal: annotated + face-blurred frame, ~1s refresh -- */
