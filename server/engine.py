@@ -1765,11 +1765,23 @@ class AttentionEngine:
         """Kişi×yüzey dikkat epizotları — kimliksiz, model-hazır (server/dataset.py).
         Faz 1 kararlarıyla aynı eşik/filtre; yüzey bağlamı rapordan okunur."""
         zctx = {z["id"]: z for z in report.get("zones", [])}
+        # sahnedeki dikkat rekabeti: es zamanli ortalama kisi sayisi. Fiziksel
+        # rafta da sanal panelde de ayni sey anlamina gelir — kac uyaranla
+        # yarisiyorsun. Ortamdan bagimsiz oldugu icin modele tasinabilir.
+        density = report.get("avg_concurrency")
         out = []
         for z in zs_att:
             zid = z["id"]
             rz = zctx.get(zid, {})
             size = rz.get("size_m") or [None, None]
+            # yuzeyin izleyiciden gorunen ACISAL genisligi (derece): 2m'lik bir
+            # raf 3m'den ve 10m'den ayni sey degildir. Piksel/metre yerine bunu
+            # kaydetmek, olcuyu ortamdan bagimsiz hale getirir.
+            ang = None
+            wm = (size or [None])[0]
+            vd = rz.get("avg_view_distance_m")
+            if wm and vd and vd > 0.2:
+                ang = round(math.degrees(2 * math.atan((wm / 2.0) / vd)), 1)
             for p in persons.values():
                 dw = p["dwell"].get(zid, 0) if hasattr(p["dwell"], "get") else p["dwell"][zid]
                 if dw < self.min_dwell:
@@ -1777,15 +1789,21 @@ class AttentionEngine:
                 head = p.get("sig_sec", {}).get("head", 0)
                 body = p.get("sig_sec", {}).get("body", 0)
                 vv = p.get("v") or []
+                gl = int(p.get("episodes", {}).get(zid, 0))
+                did_reach = bool(p.get("reach_events", {}).get(zid))
                 out.append({
                     "zone_type": z["type"],
                     "dwell": round(float(dw), 2),
-                    "glances": int(p.get("episodes", {}).get(zid, 0)),
+                    "glances": gl,
                     "signal": "head" if head >= body else "body",
                     "approach_speed": round(float(np.mean(vv)), 3) if vv else None,
-                    "reached": bool(p.get("reach_events", {}).get(zid)),
-                    "view_distance_m": rz.get("avg_view_distance_m"),
+                    "reached": did_reach,
+                    # "ilgilendi ama ikna olmadi" — davranissal etiket (Spec §2)
+                    "hesitated": bool(dw >= 3.0 and gl >= 2 and not did_reach),
+                    "view_distance_m": vd,
                     "zone_w_m": size[0], "zone_h_m": size[1],
+                    "angular_size_deg": ang,
+                    "scene_density": density,
                 })
         return out
 
@@ -1796,6 +1814,14 @@ class AttentionEngine:
             eps = self._episodes(persons, zs_att, report)
             n = dataset.record(source, kind, report.get("spec", "1.0"), eps)
             report["dataset_episodes"] = n
+            # NORMATIF KIYAS: bu yuzey, ayni tipteki yuzeylerin yuzde kacindan
+            # iyi? Moat'in gorunur hale geldigi yer — ve az veriyle konusmaz:
+            # 20 epizodun altinda percentile_rank None doner, kiyas basilmaz.
+            for z, zr in zip(zs_att, report.get("zones", [])):
+                if zr.get("avg_dwell"):
+                    pr = dataset.percentile_rank(z["type"], zr["avg_dwell"])
+                    if pr is not None:
+                        zr["benchmark_percentile"] = pr
         except Exception:
             pass
 

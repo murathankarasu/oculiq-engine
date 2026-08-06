@@ -1259,6 +1259,7 @@ function zoneReport(z, still) {
       ${still ? "" : `<div class="mcard" title="${GLOSS["Stopping power"]}"><div class="k">Stopping power <span class="new-tag">NEW</span></div><div class="v">${fmt(z.stopping_power, 0)}<small>% slowdown</small></div></div>`}
       ${!still && z.reaches != null ? `<div class="mcard" title="A wrist keypoint inside the shelf zone in ≥3 consecutive samples (Spec v1.0)."><div class="k">Reaches <span class="new-tag">NEW</span></div><div class="v">${z.reaches}</div></div>` : ""}
       ${!still && z.reach_rate != null ? `<div class="mcard" title="Share of lookers who reached toward the shelf."><div class="k">Reach rate</div><div class="v">${fmt(z.reach_rate, 1)}<small>% of lookers</small></div></div>` : ""}
+      ${z.benchmark_percentile != null ? `<div class="mcard" title="Compared with the same surface type across all analyses in your anonymous benchmark dataset. Withheld until at least 20 comparable episodes exist."><div class="k">Benchmark <span class="new-tag">NORM</span></div><div class="v">${z.benchmark_percentile}<small>th pct of ${esc(z.type)}s</small></div></div>` : ""}
       ${!still && z.hesitations != null ? `<div class="mcard star" title="Looked for ${z.hesitation_criteria.min_dwell_s}s+, came back ${z.hesitation_criteria.min_glances}+ times, but never reached for the product — interested, not convinced."><div class="k">Hesitation <span class="new-tag">NEW</span></div><div class="v">${fmt(z.hesitation_rate, 0)}<small>% · ${z.hesitations} people</small></div></div>` : ""}
       ${z.size_m ? `<div class="mcard" title="${GLOSS["Zone size"]}${z.size_source === "ground-anchored" ? " Measured against the calibrated ground plane because the depth map disagreed." : ""}"><div class="k">Zone size <span class="new-tag">3D</span></div><div class="v">${fmt(z.size_m[0], 1)}×${fmt(z.size_m[1], 1)}<small>m${z.surface_tilt_deg != null ? " · " + fmt(z.surface_tilt_deg, 0) + "° tilt" : ""}${z.size_source === "ground-anchored" ? " · ground-anchored" : ""}</small></div></div>` : ""}
       ${z.size_note ? `<div class="mcard" title="A surface size that isn't physically plausible is withheld rather than reported (Spec v1.0 §10)."><div class="k">Zone size <span class="new-tag">3D</span></div><div class="v" style="font-size:13px;line-height:1.3">${esc(z.size_note)}</div></div>` : ""}
@@ -1368,9 +1369,10 @@ async function lvBench() {
     const rows = s.by_zone_type.map((z) =>
       `<tr><td>${esc(z.zone_type)}</td><td>${z.episodes}</td><td>${fmt(z.avg_dwell, 1)}s</td>` +
       `<td>${z.reach_rate != null ? fmt(z.reach_rate, 0) + "%" : "—"}</td>` +
-      `<td>${z.head_signal_share != null ? fmt(z.head_signal_share, 0) + "%" : "—"}</td></tr>`).join("");
+      `<td>${z.hesitation_rate != null ? fmt(z.hesitation_rate, 0) + "%" : "—"}</td>` +
+      `<td>${z.avg_angular_size_deg != null ? fmt(z.avg_angular_size_deg, 0) + "°" : "—"}</td></tr>`).join("");
     el.innerHTML = `<div class="wide-chart"><h4>Attention dataset <span class="new-tag">ASSET</span> — ${s.total_episodes} episodes from ${s.sources} source${s.sources === 1 ? "" : "s"} · schema v${s.schema_version}</h4>
-      <table class="bench-tbl"><thead><tr><th>Surface</th><th>Episodes</th><th>Avg dwell</th><th>Reach</th><th>Head signal</th></tr></thead><tbody>${rows}</tbody></table>
+      <table class="bench-tbl"><thead><tr><th>Surface</th><th>Episodes</th><th>Avg dwell</th><th>Reach</th><th>Hesitation</th><th>Angular size</th></tr></thead><tbody>${rows}</tbody></table>
       <p class="aud-note">Anonymous, aggregate — the normative benchmark (retail moat) and the seed corpus for the cross-environment attention model.</p></div>`;
   } catch { el.innerHTML = ""; }
 }

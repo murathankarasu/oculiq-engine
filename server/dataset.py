@@ -21,10 +21,17 @@ from pathlib import Path
 DATA = Path(__file__).resolve().parent.parent / "data"
 DB = DATA / "metrics.db"
 
-SCHEMA_VERSION = 1
-# model-hazır özellik seti — versiyonla; şema değişirse SCHEMA_VERSION artar
+SCHEMA_VERSION = 2
+# Model-hazir ozellik seti — versiyonla; sema degisirse SCHEMA_VERSION artar.
+#
+# v2'de eklenenler ORTAMDAN BAGIMSIZ olacak sekilde secildi: bir yuzeyin
+# kisiden gorunen ACISAL BUYUKLUGU ve sahnedeki DIKKAT REKABETI, fiziksel bir
+# rafta da sanal bir panelde de ayni anlami tasir. Piksel/metre gibi ortama
+# bagli olculer yerine bunlari toplamak, veri setini hem retail benchmark'i
+# hem de ortamlar-arasi dikkat modelinin tohumu yapar (bkz. AR vizyon raporu).
 FIELDS = ("zone_type", "dwell", "glances", "signal", "approach_speed",
-          "reached", "view_distance_m", "zone_w_m", "zone_h_m")
+          "reached", "hesitated", "view_distance_m", "zone_w_m", "zone_h_m",
+          "angular_size_deg", "scene_density")
 
 
 def _db():
@@ -47,6 +54,13 @@ def _db():
         zone_w_m   REAL,            -- yüzey genişliği (m); yoksa NULL
         zone_h_m   REAL,
         created_at INTEGER)""")
+    # v2 alanlari (mevcut kurulumlarda sessizce eklenir)
+    cols = {r[1] for r in con.execute("PRAGMA table_info(attention_events)")}
+    for name, decl in (("hesitated", "INTEGER"),        # ilgilendi ama uzanmadi
+                       ("angular_size_deg", "REAL"),    # yuzeyin gorunen acisal genisligi
+                       ("scene_density", "REAL")):      # es zamanli kisi sayisi (dikkat rekabeti)
+        if name not in cols:
+            con.execute(f"ALTER TABLE attention_events ADD COLUMN {name} {decl}")
     return con
 
 
@@ -59,15 +73,18 @@ def record(source, kind, spec, episodes):
              e.get("zone_type"), e.get("dwell"), e.get("glances"), e.get("signal"),
              e.get("approach_speed"),
              1 if e.get("reached") else 0,
-             e.get("view_distance_m"), e.get("zone_w_m"), e.get("zone_h_m"), now)
+             e.get("view_distance_m"), e.get("zone_w_m"), e.get("zone_h_m"), now,
+             1 if e.get("hesitated") else 0,
+             e.get("angular_size_deg"), e.get("scene_density"))
             for e in episodes]
     con = _db()
     with con:
         con.executemany(
             "INSERT INTO attention_events "
             "(source,kind,spec,schema_v,zone_type,dwell,glances,signal,"
-            " approach_speed,reached,view_distance_m,zone_w_m,zone_h_m,created_at) "
-            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)", rows)
+            " approach_speed,reached,view_distance_m,zone_w_m,zone_h_m,created_at,"
+            " hesitated,angular_size_deg,scene_density) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", rows)
     con.close()
     return len(rows)
 
@@ -80,7 +97,8 @@ def stats():
     by_type = con.execute("""
         SELECT zone_type, COUNT(*), AVG(dwell), AVG(reached),
                AVG(CASE WHEN signal='head' THEN 1.0 ELSE 0.0 END),
-               AVG(approach_speed)
+               AVG(approach_speed), AVG(hesitated), AVG(angular_size_deg),
+               AVG(scene_density)
         FROM attention_events GROUP BY zone_type ORDER BY COUNT(*) DESC""").fetchall()
     sources = con.execute("SELECT COUNT(DISTINCT source) FROM attention_events").fetchone()[0]
     con.close()
@@ -93,7 +111,10 @@ def stats():
              "avg_dwell": round(r[2], 2) if r[2] is not None else None,
              "reach_rate": round(r[3] * 100, 1) if r[3] is not None else None,
              "head_signal_share": round(r[4] * 100, 1) if r[4] is not None else None,
-             "avg_approach_speed": round(r[5], 3) if r[5] is not None else None}
+             "avg_approach_speed": round(r[5], 3) if r[5] is not None else None,
+             "hesitation_rate": round(r[6] * 100, 1) if r[6] is not None else None,
+             "avg_angular_size_deg": round(r[7], 1) if r[7] is not None else None,
+             "avg_scene_density": round(r[8], 1) if r[8] is not None else None}
             for r in by_type],
     }
 

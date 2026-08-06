@@ -73,8 +73,10 @@ the measurement and the comparison that produced it, or it is horoscope.
 
 - **Self-benchmark** — this week vs. the shop's own trailing weeks. Always valid,
   needs no other tenant's data.
-- **Category benchmark** — against the anonymous normative dataset we are already
-  accumulating (`server/dataset.py`), never against a named neighbour.
+- **Category benchmark** — SHIPPED (first slice). Each surface now carries its
+  percentile against the same surface type across the anonymous dataset
+  (`benchmark_percentile`), withheld below 20 comparable episodes. Never against
+  a named neighbour.
 - **Rules with evidence**, e.g. "Capture rate 11% vs. your 4-week median 19% —
   the drop starts Tuesday, when the window display changed." Withhold the
   recommendation when the sample is too small to support it, exactly as we
