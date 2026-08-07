@@ -11,26 +11,47 @@ import os
 import urllib.request
 
 SYSTEM = (
-    "You are the senior analytics writer for Oculiq, an on-device attention measurement product "
-    "for out-of-home advertising. You receive a full JSON attention report (funnel, dwell stats, "
-    "timelines, dwell histograms, density timeline, CIs, signal mix, calibration, CPMs). "
-    "Write a DETAILED, concrete analysis in English markdown with exactly these sections:\n"
-    "**Executive summary** — 3-4 sentences: the headline result and what it means commercially.\n"
-    "**Funnel & engagement** — traffic -> impressions -> engaged -> deep per zone; conversion "
-    "percentages between stages; what drop-offs suggest.\n"
-    "**Zone-by-zone breakdown** — one bullet block per zone: rate (with 95% CI), attentive seconds, "
-    "avg/max dwell, time-to-first-look, glances per looker, stopping power, AQS; interpret each.\n"
-    "**Temporal patterns** — use the timeline buckets and density_timeline: when attention peaked, "
-    "quiet periods, whether crowd density and attention move together.\n"
-    "**Audience behavior** — dwell histogram shape (glancers vs readers), re-look behavior, "
-    "stopping power meaning.\n"
-    "**Media value & pricing** — reach CPM vs attention CPM if costs present; which zone deserves "
-    "premium pricing and why; if costs missing, say what adding them unlocks.\n"
-    "**Recommendations** — 3-5 specific, actionable items (placement, creative, measurement).\n"
-    "**Data quality & caveats** — CI width, signal mix (head vs body share and its confidence), "
-    "auto-calibration status, sample duration; be honest about what is directional vs solid.\n"
-    "450-650 words. Never invent numbers not present in the JSON. The method is orientation-based "
-    "attention (not eye-tracking) — keep claims honest and cite the numbers you use."
+    "You write the plain-language read-out for Oculiq, which measures where people actually look "
+    "in a physical shop, on the shop's own camera. You are writing for the shop owner or the "
+    "brand's marketing manager — a smart person with no analytics background. They should never "
+    "have to look a word up.\n\n"
+    "HOW TO WRITE\n"
+    "- Short sentences. Everyday words. Write like you are standing in the shop explaining what "
+    "you saw, not like a dashboard.\n"
+    "- The FIRST time any measure appears, explain it in the same sentence, in passing. "
+    "Not '\"AQS 62\"' but '\"a placement score of 62 out of 100 — that score blends how many "
+    "people looked, how long they stayed, and whether they came back for a second look\"'. Same for "
+    "attentive seconds ('total seconds of human attention'), capture rate ('of everyone who walked "
+    "past, the share who actually came in'), hesitation ('looked properly, more than once, and "
+    "still walked away empty-handed'), reach ('reached a hand toward the shelf'), CPM ('what you "
+    "paid per thousand'), and the 95% range ('with this much footage the true figure sits "
+    "somewhere in this band').\n"
+    "- Use round numbers in the prose. Say 'about a quarter' and give the exact figure once.\n"
+    "- No bullet lists of raw metrics. Write paragraphs that make a point, and put the number "
+    "inside the sentence that needs it.\n\n"
+    "SECTIONS (use these exact headings)\n"
+    "**What happened** — 3-4 sentences a person could repeat out loud from memory.\n"
+    "**Where people looked** — walk through each surface as a story: how many walked past, how "
+    "many noticed it, how long they stayed, whether they came back. Say what that pattern means "
+    "about the surface, not just what the numbers are.\n"
+    "**What the shopping behaviour says** — use whatever is in the JSON: people who came in vs "
+    "walked past, how long visits lasted, people who left quickly, people who looked at the window "
+    "and then came in, people who reached for the product, and people who studied something "
+    "repeatedly and still left with nothing. That last group is the most commercially interesting "
+    "one — name them plainly as interested-but-not-convinced.\n"
+    "**What to change** — 2-4 specific things to do, each tied to the number that justifies it. "
+    "A shopkeeper should be able to act on one of them tomorrow morning without buying anything.\n"
+    "**How much to trust this** — plain talk. How long the footage was, how wide the 95% range is, "
+    "whether the camera view was good enough, what would make the numbers firmer. If something is "
+    "too thin to act on, say so in one clear sentence.\n\n"
+    "RULES\n"
+    "- Never invent a number that is not in the JSON. If a measure is missing, say what it would "
+    "have told them and move on.\n"
+    "- This measures head and body direction, NOT eye movement. Never say eye-tracking, never say "
+    "you know what someone read or felt. 'Faced the shelf' is true; 'was interested in the price "
+    "tag' is not.\n"
+    "- Small counts deserve hedging, not confidence. Four people is an anecdote.\n"
+    "- 400-600 words."
 )
 
 
@@ -97,122 +118,186 @@ def _gemini(payload):
         return json.load(r)["candidates"][0]["content"]["parts"][0]["text"]
 
 
+def _plural(n, one, many=None):
+    return one if n == 1 else (many or one + "s")
+
+
 def _local(report):
-    """Anahtar yokken: kural-tabanli, rakamlari dogru kullanan detayli analiz."""
+    """Anahtar yokken calisan ozet — LLM'le AYNI dilde: jargonsuz, tam cumleli.
+
+    Bu metni okuyan kisi analitik bilmiyor. Her olcu ilk gectigi cumlede
+    aciklanir; hicbir kisaltma tek basina birakilmaz."""
     zs = report["zones"]
     if not zs:
-        return "No zones analyzed."
+        return "No zones were marked on this footage, so there is nothing to report yet. Draw a surface over a window, shelf or screen and run it again."
     still = report["still"]
     best = max(zs, key=lambda z: z["aqs"])
     total_att = sum(z["attentive_seconds"] for z in zs)
+    n = report["traffic"]
     L = []
 
-    L.append("**Executive summary**")
-    L.append(
-        f"{report['traffic']} unique people were tracked"
-        + ("" if still else f" over {report['duration']}s of footage")
-        + f" (peak {report['peak_concurrency']} concurrent"
-        + (f", avg crowd {report['avg_concurrency']}" if report.get("avg_concurrency") is not None else "")
-        + f"). The strongest placement was **{best['label']}** with AQS {best['aqs']} and a "
-        f"{best['attention_rate']}% attention rate. Zones captured "
-        f"{round(total_att, 1)} attentive seconds in total.")
-    L.append("")
-
-    if not still:
-        L.append("**Funnel & engagement**")
-        for z in zs:
-            imp, eng, deep = z["impressions"], z["engaged"], z["deep"]
-            e_pct = round(eng / imp * 100) if imp else 0
-            d_pct = round(deep / imp * 100) if imp else 0
-            L.append(
-                f"- {z['label']}: {z['traffic']} → {imp} impressions "
-                f"({z['attention_rate']}%) → {eng} engaged ≥1s ({e_pct}% of lookers) → "
-                f"{deep} deep ≥3s ({d_pct}%). "
-                + ("Strong retention once noticed." if imp and e_pct >= 60
-                   else "Most looks stay brief — creative may not be holding attention." if imp
-                   else "No qualified impressions at the current thresholds."))
-        L.append("")
-
-    L.append("**Zone-by-zone breakdown**")
-    for z in zs:
-        ci = z.get("attention_rate_ci")
-        parts = [f"rate {z['attention_rate']}%" + (f" (95% CI {ci[0]}–{ci[1]}%)" if ci else "")]
-        if not still:
-            parts += [f"{z['attentive_seconds']}s attention",
-                      f"dwell avg {z['avg_dwell']}s / max {z['max_dwell']}s"]
-            if z.get("time_to_first_look") is not None:
-                parts.append(f"first look after {z['time_to_first_look']}s")
-            parts.append(f"{z['glances_per_looker']} glances/looker")
-            if z["stopping_power"] > 0:
-                parts.append(f"{z['stopping_power']}% slowdown while looking")
-        parts.append(f"AQS {z['aqs']}")
-        L.append(f"- **{z['label']}** ({z['type']}): " + ", ".join(parts) + ".")
-    L.append("")
-
-    if not still:
-        L.append("**Temporal patterns**")
-        for z in zs:
-            tl = z.get("timeline") or []
-            if tl:
-                pk = max(tl, key=lambda p: p["sec"])
-                if pk["sec"] > 0:
-                    L.append(f"- {z['label']}: attention peaked at t={pk['t']}–{pk['t']+2}s "
-                             f"({pk['sec']}s of attention in that window).")
-        dt_ = report.get("density_timeline") or []
-        if dt_:
-            pkd = max(dt_, key=lambda p: p["avg"])
-            L.append(f"- Crowd density peaked around t={pkd['t']}s ({pkd['avg']} people on average).")
-        L.append("")
-
-        L.append("**Audience behavior**")
-        for z in zs:
-            h = z.get("dwell_histogram") or [0] * 5
-            tot = sum(h)
-            if tot:
-                labels = ["<1s glancers", "1–2s scanners", "2–3s readers", "3–5s engagers", "5s+ dwellers"]
-                dom = max(range(5), key=lambda i: h[i])
-                L.append(f"- {z['label']}: dominant group is {labels[dom]} ({h[dom]}/{tot} lookers). "
-                         + ("Re-look behavior present." if z["glances_per_looker"] > 1.2 else ""))
-        L.append("")
-
-    L.append("**Media value & pricing**")
-    priced = [z for z in zs if z.get("attention_cpm") is not None]
-    if priced:
-        cheap = min(priced, key=lambda z: z["attention_cpm"])
-        L.append(f"- Best attention value: {cheap['label']} at ${cheap['attention_cpm']} per 1k "
-                 f"attentive seconds (reach CPM ${cheap['reach_cpm']}).")
-        for z in priced:
-            if z is not cheap:
-                L.append(f"- {z['label']}: attention CPM ${z['attention_cpm']}, reach CPM ${z['reach_cpm']}.")
+    # ---------- ne oldu ----------
+    L.append("**What happened**")
+    dur = "" if still else f" in {report['duration']:.0f} seconds of footage"
+    s = (f"{n} {_plural(n, 'person', 'people')} passed through the camera's view{dur}"
+         f", at most {report['peak_concurrency']} of them in shot at once. ")
+    if report.get("capture_rate") is not None:
+        s += (f"About {report['capture_rate']:.0f} in every 100 of them walked in through the "
+              f"door you marked — that is the share of passers-by you actually captured. ")
+    s += (f"Across everything you marked, people spent {total_att:.0f} seconds "
+          f"facing your surfaces. ")
+    if n < 15:
+        s += ("That is a small number of people, so read everything below as a first impression "
+              "rather than a finding.")
     else:
-        L.append("- Add slot costs to unlock reach-CPM vs attention-CPM comparison — the divergence "
-                 "between the two is where under/over-priced inventory shows up.")
-    L.append(f"- {best['label']} justifies premium positioning on current AQS ranking.")
+        s += f"The surface that did best was **{best['label']}**."
+    L.append(s)
     L.append("")
 
-    L.append("**Recommendations**")
+    # ---------- nereye baktilar ----------
+    L.append("**Where people looked**")
+    first = True
+    for z in zs:
+        imp = z["impressions"]
+        ci = z.get("attention_rate_ci")
+        s = f"**{z['label']}** was noticed by {imp} of the {z['traffic']} {_plural(z['traffic'], 'person', 'people')} who came within range"
+        s += f" — {z['attention_rate']:.0f}%."
+        if ci and first:
+            s += (f" With this much footage the true figure sits somewhere between {ci[0]:.0f}% "
+                  f"and {ci[1]:.0f}%, so treat it as a range, not a single number.")
+        if not still and imp:
+            s += (f" The people who did look stayed {z['avg_dwell']:.1f} seconds on average, "
+                  f"and the longest single look ran {z['max_dwell']:.1f} seconds.")
+            if z.get("glances_per_looker", 0) > 1.2:
+                s += (f" They came back for another look {z['glances_per_looker']:.1f} times each on "
+                      "average, which usually means the surface is doing its job of pulling people "
+                      "back rather than being read once and forgotten.")
+            ttfl = z.get("time_to_first_look")
+            if ttfl is not None:
+                if ttfl < 1:
+                    s += " People turned toward it almost the moment they came into view."
+                else:
+                    s += (f" On average it took {ttfl:.0f} seconds from entering the camera's view "
+                          "before anyone turned toward it")
+                    s += ("." if ttfl <= 3 else
+                          " — slow enough that many people are probably well past it before it registers.")
+        if z.get("benchmark_percentile") is not None:
+            s += (f" Compared with every other {z['type']} we have measured, this one holds attention "
+                  f"longer than {z['benchmark_percentile']}% of them.")
+        L.append(s)
+        L.append("")
+        first = False
+
+    # ---------- alisveris davranisi ----------
+    beh = []
+    for z in zs:
+        if z.get("reaches"):
+            beh.append(f"{z['reachers']} {_plural(z['reachers'], 'person', 'people')} actually "
+                       f"reached a hand toward **{z['label']}** — the closest thing to a purchase "
+                       f"signal a camera can see without watching the till.")
+        if z.get("hesitations"):
+            beh.append(f"{z['hesitations']} {_plural(z['hesitations'], 'person', 'people')} studied "
+                       f"**{z['label']}** properly, came back to it more than once, and still walked "
+                       f"away without touching anything. These are your interested-but-not-convinced "
+                       f"shoppers, and they are the cheapest sale in the shop to win back.")
+    for l in (report.get("visits") or {}).get("lines") or []:
+        if l.get("visits"):
+            beh.append(f"{l['visits']} {_plural(l['visits'], 'visit')} started and finished inside "
+                       f"the footage. Half of them lasted under {l['median_duration_s']:.0f} seconds"
+                       + (f", and {l['bounce_rate']:.0f}% of visitors were back out of the door "
+                          f"within {l['bounce_threshold_s']:.0f} seconds without looking at anything "
+                          f"you marked." if l.get("bounce_rate") is not None else "."))
+        if l.get("last_surface_before_exit"):
+            a = l["last_surface_before_exit"][0]
+            beh.append(f"The last thing most leaving shoppers faced was **{a['label']}** "
+                       f"({a['visits']} of them). Whatever is there is the final impression people "
+                       f"take out of the door.")
+        for w in l.get("window_conversion") or []:
+            if not w["lookers"]:
+                continue
+            line = (f"{w['lookers']} {_plural(w['lookers'], 'person', 'people')} stopped at "
+                    f"**{w['label']}** from outside, and {w['entered_after_looking']} of them came "
+                    f"in afterwards — {w['conversion_rate']:.0f}%.")
+            # Yorum sonuca gore degisir: %0'a "vitrin isini yapiyor" demek yanlis olurdu.
+            if w["entered_after_looking"] and w["conversion_rate"] >= 20:
+                line += " That is the window earning its place, measured rather than guessed."
+            elif w["lookers"] < 5:
+                line += (" Too few people to read anything into yet — but this is the number that "
+                         "tells you whether the window sells or just decorates.")
+            else:
+                line += (" People are stopping but not coming in, so the window is winning the "
+                         "glance and losing the step through the door.")
+            beh.append(line)
+    if beh:
+        L.append("**What the shopping behaviour says**")
+        L.extend(x + "\n" for x in beh)
+
+    # ---------- ne degistirmeli ----------
+    L.append("**What to change**")
+    acts = []
+    hes = max(zs, key=lambda z: z.get("hesitations") or 0)
+    if hes.get("hesitations"):
+        acts.append(f"Put a price, a size guide or a staff member within arm's reach of "
+                    f"**{hes['label']}**. {hes['hesitations']} {_plural(hes['hesitations'], 'person', 'people')} "
+                    f"looked hard at it and left anyway — they had the interest and lost it "
+                    f"somewhere between looking and asking.")
     if len(zs) > 1:
         worst = min(zs, key=lambda z: z["aqs"])
-        L.append(f"- Prioritize {best['label']} for premium campaigns; test repositioning "
-                 f"{worst['label']} (AQS {worst['aqs']}) in the what-if simulator before physical changes.")
-    L.append("- Use the what-if simulator to compare alternative placements against the recorded gaze rays.")
-    if not still and any((z.get("time_to_first_look") or 99) > 2 for z in zs):
-        L.append("- Slow time-to-first-look suggests weak stopping power at approach — consider higher-contrast creative.")
-    L.append("- Re-run at different dayparts to build a temporal baseline before pricing decisions.")
-    L.append("")
+        # Yalnizca gercek bir fark varsa soyle: 25% ile 24% arasindaki bir farki
+        # "cogu kisi kaciriyor" diye sunmak uydurma bir sorun yaratirdi.
+        if worst is not best and best["aqs"] - worst["aqs"] >= 10:
+            act = (f"**{worst['label']}** is getting noticeably less attention than "
+                   f"**{best['label']}** ({worst['attention_rate']:.0f}% of people versus "
+                   f"{best['attention_rate']:.0f}%).")
+            # What-if simulatoru YALNIZCA video analizinde var; canlida kayit
+            # tutulmadigi icin isin yok. Olmayan bir ekrana yonlendirmeyiz.
+            act += (" Before moving anything physically, drag it around in the what-if simulator "
+                    "on this page — it replays the real looks that were recorded and shows what a "
+                    "different position would have caught."
+                    if report.get("sim") else
+                    " Record a short clip of this camera and open it as a video analysis: that "
+                    "gives you the what-if simulator, where you can move the surface and see what "
+                    "a different position would have caught before you shift anything.")
+            acts.append(act)
+    slow = [z for z in zs if (z.get("time_to_first_look") or 0) > 3]
+    if slow and not still:
+        acts.append(f"People take {slow[0]['time_to_first_look']:.0f} seconds to notice "
+                    f"**{slow[0]['label']}**. Anything that reads from further away — bigger type, "
+                    f"more contrast, a light — buys back those seconds.")
+    if report.get("capture_rate") is not None and report["capture_rate"] < 15:
+        acts.append(f"Only {report['capture_rate']:.0f}% of passers-by come in. The window is doing "
+                    f"the recruiting here, so it is worth more of your attention than anything "
+                    f"inside the shop.")
+    if not acts:
+        acts.append("Nothing in this footage is clearly broken. The useful next step is more "
+                    "footage at different times of day, so you can see whether these patterns hold.")
+    acts.append("Check the hour-by-hour panel below once a few days have built up — it names the "
+                "hour of the day where you lose the most people, which is the one thing here you "
+                "can schedule staff around."
+                if report.get("mode") == "live" else
+                "Run this again at a different time of day. One clip is a snapshot; the pattern "
+                "across a week is what you can actually price and plan against.")
+    L.extend(x + "\n" for x in acts)
 
-    L.append("**Data quality & caveats**")
+    # ---------- ne kadar guvenmeli ----------
+    L.append("**How much to trust this**")
+    mh = report.get("measurement_health") or {}
     sig = best.get("signal_share", {})
-    body_share = sig.get("body", 0)
-    cal = report.get("calibration") or {}
-    L.append(
-        f"- Orientation-based measurement (not eye-tracking). {body_share}% of the attention signal "
-        "comes from body orientation (confidence 0.5) — treat rates as directional; the 95% CIs are "
-        "the honest range.")
-    L.append(
-        f"- Perspective auto-calibration: {'active (horizon fit from ' + str(cal.get('samples')) + ' samples)' if cal.get('auto') else 'fallback defaults in use (scene too sparse to fit)'}"
-        + (f"; scan mode: {report.get('scan_mode')}" if report.get("scan_mode") else "") + ".")
-    if not still and report["duration"] < 30:
-        L.append(f"- Short sample ({report['duration']}s): results are indicative — capture longer "
-                 "footage for pricing-grade numbers.")
+    t = ("This is measured from which way people's heads and bodies were turned — not from their "
+         "eyes. It tells you someone faced a surface, never what they read or how they felt. ")
+    if sig.get("body", 0) > 40:
+        t += (f"For {sig['body']:.0f}% of the measurements only the body direction was visible, "
+              "which is a weaker signal than a clear view of the head — those looks are counted "
+              "with lower confidence rather than dropped. ")
+    if mh.get("direction_share") is not None and mh["direction_share"] < 60:
+        t += (f"We could only read a direction for {mh['direction_share']:.0f}% of the people we "
+              "saw. A camera angle closer to eye level would raise that. ")
+    if not still and report["duration"] < 60:
+        t += (f"The clip is {report['duration']:.0f} seconds long, which is enough to see whether "
+              "the system works but not enough to price anything. ")
+    if n < 15:
+        t += (f"Above all, {n} people is a handful. Percentages calculated from a handful move "
+              "wildly with one extra person, so use the direction of these numbers, not their "
+              "exact value.")
+    L.append(t.strip())
     return "\n".join(L)
