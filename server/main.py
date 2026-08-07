@@ -417,10 +417,16 @@ async def camera_frame(cam_id: str):
 async def camera_live_frame(cam_id: str):
     """Canlı izleme: anotasyonlu + yüz-bulanık son kare (yalnızca bellekten).
     Kamera çalışmıyorsa ya da henüz kare yoksa 404 — çağıran görüntü gösterir."""
+    import time as _t
     from fastapi.responses import Response
     w = _workers.get(cam_id)
-    if not w or not w.is_alive() or w.preview_jpg is None:
+    if not w or not w.is_alive():
         raise HTTPException(404, "no live frame — start the camera")
+    # İzleyen var: worker anotasyonlu kare üretmeye başlasın. Kimse istemezken
+    # üretmek ölçümle ilgisiz sabit bir CPU maliyetiydi.
+    w.preview_wanted_ts = _t.time()
+    if w.preview_jpg is None:
+        raise HTTPException(404, "preview starting — retry shortly")
     return Response(content=w.preview_jpg, media_type="image/jpeg",
                     headers={"Cache-Control": "no-store"})
 

@@ -1458,6 +1458,12 @@ async function showLive() {
   }, 3000);
 }
 
+// Sekmeye dönünce bekletmeden tazele — arka planda yoklamayı durdurduğumuz için
+// aksi halde kullanıcı 3 saniye eski veriye bakardı.
+document.addEventListener("visibilitychange", () => {
+  if (!document.hidden && $("step-live").classList.contains("on")) lvTick();
+});
+
 async function lvRefresh() {
   lvCams = await (await fetch("/api/cameras")).json();
   const el = $("liveList");
@@ -1484,6 +1490,8 @@ async function lvRefresh() {
       <div class="cam-chart" id="lvc-${c.id}"></div>
     </div>`).join("");
   el.querySelectorAll("[data-act]").forEach((b) => b.onclick = () => lvAction(b));
+  // DOM yeniden kuruldu: grafikler boşaldı, bir kez zorla çizdir.
+  for (const k of Object.keys(lvChartAt)) delete lvChartAt[k];
   lvTick();
 }
 
@@ -1607,10 +1615,18 @@ function lvWatchClose() {
 }
 $("lvwClose").onclick = lvWatchClose;
 
+const lvChartAt = {};        // kamera -> grafiğin son çizildiği an
+
 async function lvTick() {
+  // Arka plandaki sekmeyi yoklamak boşuna iş: tarayıcı zaten göstermiyor.
+  if (document.hidden) return;
   for (const c of lvCams) {
     const box = $("lv-" + c.id);
     if (!box) continue;
+    // Durmuş kamera veri üretmiyor; durumu ancak kullanıcı başlatınca değişir
+    // ve o da lvRefresh'i tetikler. Her 3 sn'de 5 durmuş kamerayı yoklamak
+    // panelin ana yüküydü ve karşılığında hiçbir şey öğrenmiyorduk.
+    if (c.status === "stopped") { lvChart(c); continue; }
     try {
       const lv = await (await fetch(`/api/live/${c.id}`)).json();
       if (lv.status !== "live") {
@@ -1633,10 +1649,19 @@ async function lvTick() {
   }
 }
 
-async function lvChart(c) {
+async function lvChart(c, force) {
   const el = $("lvc-" + c.id);
   if (!el) return;
-  const since = Math.floor(Date.now() / 1000) - 24 * 3600;
+  // Saatlik agregatlar dakikada bir yazılır (StreamWorker.FLUSH_SEC=60), ama bu
+  // grafik 3 saniyede bir SQLite'ı 24 saat için yeniden sorgulayıp SVG'yi
+  // baştan çiziyordu — aynı çubukları saniyede yirmi kez.
+  // Kısıtlama YALNIZCA zamana bakar. Daha önce "kutu doluysa" koşulu da vardı
+  // ve henüz geçmişi olmayan kamerada kutu hep boş kaldığı için kısıtlama hiç
+  // devreye girmiyordu — tam da en çok kamerada boşuna sorgu demekti.
+  const now = Date.now();
+  if (!force && now - (lvChartAt[c.id] || 0) < 60000) return;
+  lvChartAt[c.id] = now;
+  const since = Math.floor(now / 1000) - 24 * 3600;
   const rows = await (await fetch(`/api/timeseries?camera=${c.id}&since=${since}`)).json();
   const cam = rows.filter((r) => r.zone_id === "_cam");
   if (!cam.length) { el.innerHTML = ""; return; }

@@ -13,6 +13,7 @@ Measurement: the exact same per-frame core as batch (AttentionEngine
 (no scene3d build) and does not record what-if rays.
 """
 import json
+import os
 import sqlite3
 import threading
 import time
@@ -74,9 +75,21 @@ def load_cameras():
     return []
 
 
+_CAMS_LOCK = threading.Lock()
+
+
 def save_cameras(cams):
+    """Kamera konfigini ATOMIK yaz.
+
+    Duz write_text, yazma yarida kesilirse (cokme, disk dolmasi) dosyayi yarim
+    ya da bos birakiyordu — kurulu kameralari kaybetmek demo gunu en pahali
+    hata. Once gecici dosyaya yazilir, sonra tek islemde yerine tasinir; kilit
+    de es zamanli iki kaydin birbirini ezmesini engeller."""
     DATA.mkdir(exist_ok=True)
-    CAMS.write_text(json.dumps(cams, indent=1))
+    with _CAMS_LOCK:
+        tmp = CAMS.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(cams, indent=1))
+        os.replace(tmp, CAMS)
 
 
 def query_timeseries(camera_id, zone_id=None, since=None, until=None):
@@ -164,6 +177,11 @@ class StreamWorker(threading.Thread):
         self.live = {}
         self.last_frame = None       # SADECE bellekte: zone çizimi için ham kare (blursuz)
         self.preview_jpg = None      # canlı izleme: anotasyonlu + yüz-bulanık JPEG (bellekte)
+        # Anotasyonlu kare TALEP UZERINE uretilir. Eskiden kimse izlemese de
+        # 1.2 sn'de bir tam cozunurlukte cizim + JPEG kodlama yapiliyordu; bu,
+        # olcumle hicbir ilgisi olmayan sabit bir CPU vergisiydi.
+        self.preview_wanted_ts = 0.0
+        self.PREVIEW_KEEPALIVE_S = 8.0   # son istekten sonra bu kadar sure uretmeye devam et
         self.started_ts = time.time()
         # --- akis sagligi (AVM pilotu): "live" demek yetmez, VERI AKIYOR MU? ---
         self.last_frame_ts = 0.0     # kaynaktan en son kare okunma zamani
@@ -546,8 +564,10 @@ class StreamWorker(threading.Thread):
                 self.live["status"] = "live"
                 self.live["hour_ts"] = cur_hour
 
-                # canlı izleme karesi: ~1.2s'de bir anotasyonlu + yüz-bulanık (bellekte)
-                if now - last_preview >= 1.2:
+                # canlı izleme karesi: ~1.2s'de bir anotasyonlu + yüz-bulanık (bellekte).
+                # YALNIZCA biri izlerken — /live_frame ucu preview_wanted_ts'i tazeler.
+                watching = now - self.preview_wanted_ts < self.PREVIEW_KEEPALIVE_S
+                if watching and now - last_preview >= 1.2:
                     try:
                         lc = {c.zid: c.counts()[:2] for c in self.line_counters}
                         annotated = self.eng._draw(
