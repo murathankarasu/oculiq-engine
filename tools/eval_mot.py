@@ -92,6 +92,7 @@ def main():
     tp = fp = fn = 0
     count_err = []
     our_ids = set()
+    gt_ids_scored = set()      # YALNIZCA skorlanan karelerdeki gercek kimlikler
     tiled = False
     for fp_img in frames[::a.stride]:
         idx = int(fp_img.stem)
@@ -99,6 +100,7 @@ def main():
         frame = cv2.imread(str(fp_img))
         if frame is None:
             continue
+        gt_ids_scored.update(g[0] for g in gt)
         tiled = eng._should_tile(len(gt), tiled, "auto", W, H)
         dets = eng._detect_frame(frame, tiled, tracker)
         for d in dets:
@@ -130,8 +132,14 @@ def main():
     print(f"detection     : precision {prec*100:.1f}%  recall {rec*100:.1f}%  F1 {f1*100:.1f}%")
     tag = "over-counting" if bias > 0.05 else "under-counting" if bias < -0.05 else "balanced"
     print(f"per-frame count: MAE {mae:.2f}   bias {bias:+.2f} ({tag})")
-    print(f"unique people : ours {len(our_ids)}  vs ground truth {len(gt_ids)}  "
-          f"({(len(our_ids) - len(gt_ids)) / max(len(gt_ids), 1) * 100:+.0f}%)")
+    # Kimlik sayisi YALNIZCA skorlanan karelerle kiyaslanir: gt.txt tum klibi
+    # kapsar, biz her N. kareyi isleriz — tumuyle kiyaslamak yapay bir "az
+    # sayiyor" sonucu uretirdi (bu karsilastirma once yanlis kurulmustu).
+    gid = len(gt_ids_scored)
+    print(f"unique people : ours {len(our_ids)}  vs ground truth {gid} "
+          f"(on the scored frames)  "
+          f"({(len(our_ids) - gid) / max(gid, 1) * 100:+.0f}%)")
+    print(f"                (whole clip ground truth: {len(gt_ids)} identities)")
     print("\nreminder: research-dataset numbers are for tuning only — they do not "
           "go into ACCURACY.md or any customer-facing material (see module docstring).")
 

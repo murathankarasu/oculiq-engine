@@ -22,24 +22,31 @@ have permission to use.
 | F1 | 80.3% |
 | Per-frame count MAE | 2.75 people |
 | Per-frame count bias | **+1.58 (over-counts per frame)** |
-| Unique people over the clip | 56 vs 65 ground truth — **−14% (under-counts)** |
+| Unique identities, on the scored frames | 56 vs 55 — **+2%** |
 
 ### What this tells us
 
-The two count errors point in opposite directions, and that is the useful part:
-
 - **Per frame we produce slightly too many boxes** (+1.58). In a dense crowd
-  some detections are duplicates or partial bodies.
-- **Across the clip we end up with too few distinct identities** (−14%). People
-  who leave and re-enter, or who are occluded for a while, are being merged or
-  lost rather than counted as they should be.
+  some detections are duplicates or partial bodies. Recall 82% means we still
+  miss roughly one person in six at this density.
+- **Identity count is close to correct** (+2%). The extra per-frame boxes are
+  mostly short-lived, and the ghost filter removes them before they become
+  people.
 
-This bears directly on the open question from the widestore regression, where
-tiled scanning read 28 unique people against 18 for single-pass. The engine's
-bias on dense footage is to **under**-count unique people, so the higher figure
-is more likely to be the closer one — the wider regression band was the right
-call, and the concern that tiling merely inflates identities is not supported
-here.
+### A correction we made to this page
+
+The first version of this run reported "−14%, under-counts" and concluded that
+the widestore regression's higher figure (28 unique people under tiled scanning
+vs 18 single-pass) was therefore the more accurate one.
+
+**That was wrong, and the error was in our own tool.** It compared the
+identities we found on 12 sampled frames against every identity in the full
+120-frame ground truth — a comparison that manufactures an apparent shortfall.
+Scored fairly, the count is +2%.
+
+So the widestore question stands open: this dataset gives no evidence either
+way on whether 18 or 28 is closer. The regression band remains wide because we
+do not know, not because we measured that we should.
 
 ### Limits of this run, stated plainly
 
