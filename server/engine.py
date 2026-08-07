@@ -1825,6 +1825,15 @@ class AttentionEngine:
             vd = rz.get("avg_view_distance_m")
             if wm and vd and vd > 0.2:
                 ang = round(math.degrees(2 * math.atan((wm / 2.0) / vd)), 1)
+            # TEREDDUT YALNIZCA UZANILABILIR YUZEYDE ANLAMLIDIR. Etiket "bakti,
+            # dondu tekrar bakti, ama URUNE UZANMADI" demek; vitrinin ya da
+            # bilbordun arkasina uzanmak zaten mumkun degil, dolayisiyla orada
+            # her tekrar bakan otomatik "tereddut" sayiliyordu (veri setinde
+            # window %90.9 cikmisti — olcum degil, tanim artifakti). Rapor tarafi
+            # bunu zaten shelf/display ile sinirliyordu; veri seti sinirlamiyordu
+            # ve model tohumunu kirleten taraf oydu. Uygun olmayan yuzeyde etiket
+            # False degil NULL: "tereddut etmedi" de bir iddiadir, onu da kurmayiz.
+            can_reach = z["type"] in ("shelf", "display")
             for p in persons.values():
                 dw = p["dwell"].get(zid, 0) if hasattr(p["dwell"], "get") else p["dwell"][zid]
                 if dw < self.min_dwell:
@@ -1840,9 +1849,10 @@ class AttentionEngine:
                     "glances": gl,
                     "signal": "head" if head >= body else "body",
                     "approach_speed": round(float(np.mean(vv)), 3) if vv else None,
-                    "reached": did_reach,
+                    "reached": did_reach if can_reach else None,
                     # "ilgilendi ama ikna olmadi" — davranissal etiket (Spec §2)
-                    "hesitated": bool(dw >= 3.0 and gl >= 2 and not did_reach),
+                    "hesitated": (bool(dw >= 3.0 and gl >= 2 and not did_reach)
+                                  if can_reach else None),
                     "view_distance_m": vd,
                     "zone_w_m": size[0], "zone_h_m": size[1],
                     "angular_size_deg": ang,
