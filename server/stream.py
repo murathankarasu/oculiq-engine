@@ -199,7 +199,10 @@ class StreamWorker(threading.Thread):
                    "z_staff": z_staff, "z_shelf": z_shelf, "zs_att": zs_att,
                    "W": W, "H": H, "scene": None, "scene_ok": False, "zquads": {},
                    "gaze3d_n": 0, "gaze_total": 0, "wrist_samples": 0,
-                   "record_rays": False}
+                   "record_rays": False,
+                   # yogunluk kovalari 2 sn'lik: 900 kova ≈ son 30 dk. Canlida
+                   # sinirsiz birakmak gunler suren calismada bellegi sisirirdi.
+                   "density_keep": 900}
         self.win_samples = 0
         if not hasattr(self, "_tiled"):
             self._tiled, self._last_dets = False, []
@@ -297,31 +300,29 @@ class StreamWorker(threading.Thread):
         st = self.st
         elapsed = max(time.time() - self.started_ts, 0.1)
         rep = eng._report(persons, st["zs_att"], st["timeline"],
-                          duration=elapsed, peak=0,
+                          duration=elapsed, peak=st.get("peak", 0),
                           cost_map=self.cam.get("costs") or {},
                           still=False, elapsed=elapsed, sim=None)
+        # t0 kova ızgarasına yuvarlanır; ham started_ts ile ilk kova eksi çıkıyordu
+        eng._apply_density(rep, st, t0=int(self.started_ts // 2) * 2)
+        eng._apply_benchmark(rep, st["zs_att"])
+        # Kanit zaman damgalari: canlida saat unix epoch olarak birikir; raporda
+        # pencere basina gore saniyeye cevrilir — video raporuyla ayni birim.
+        for zr in rep.get("zones", []):
+            for ev in zr.get("evidence", []) or []:
+                if ev.get("start", 0) > 1e6:
+                    ev["start"] = round(ev["start"] - self.started_ts, 1)
         rep["mode"] = "live"
         rep["scan_mode"] = ("live tiled multi-scan (crowd)"
                             if getattr(self, "_tiled", False) else "live single-pass")
         rep["window_started"] = int(self.started_ts)
         if self._scene_state:
             rep["scene3d"] = self._scene_state
-        # 3D yuzey olculeri (video raporuyla ayni alanlar + ayni durustluk kapisi)
+        # 3D yuzey olculeri — video raporuyla AYNI kod yolu (eng._apply_surface_3d);
+        # burada bir kopya tutulmasi iki tarafin sessizce ayrilmasina yol acmisti.
         if self._scene is not None and self._zquads:
-            for z, zr in zip(st["zs_att"], rep.get("zones", [])):
-                q = self._zquads.get(z["id"])
-                if not q:
-                    continue
-                wq, hq = float(q["w_m"]), float(q["h_m"])
-                if 0.15 <= wq <= 20.0 and 0.15 <= hq <= 20.0:
-                    zr["size_m"] = [q["w_m"], q["h_m"]]
-                    zr["size_source"] = q.get("depth_source", "depth-map")
-                else:
-                    zr["size_note"] = (f"surface size withheld — implausible "
-                                       f"({wq:.1f}x{hq:.1f} m); depth unreliable here")
-                zr["zone_depth_m"] = q["depth_m"]
-                if q.get("tilt_deg") is not None:
-                    zr["surface_tilt_deg"] = q["tilt_deg"]
+            eng._apply_surface_3d(rep, st["zs_att"], persons, self._scene,
+                                  quads=self._zquads)
         # cizgiler + capture rate (video ile ayni alan adlari)
         if self.line_counters:
             traffic_n = len(persons)
@@ -333,7 +334,8 @@ class StreamWorker(threading.Thread):
                     "id": z["id"], "label": z["label"], "line": z.get("line_norm"),
                     "enters": ins, "exits": outs,
                     "capture_rate": round(ins / traffic_n * 100, 1) if traffic_n else 0.0,
-                    "events": [{"t": e[0], "pid": e[1], "dir": e[2]} for e in ev[:200]],
+                    "events": [{"t": round(e[0] - self.started_ts, 1), "pid": e[1],
+                                "dir": e[2]} for e in ev[:200]],
                 })
             rep["lines"] = lines_out
             rep["capture_rate"] = lines_out[0]["capture_rate"] if lines_out else None

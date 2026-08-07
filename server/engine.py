@@ -609,6 +609,21 @@ class AttentionEngine:
         return n_people >= 8 or W * H >= 1920 * 1080
 
     # ---------- video ----------
+    @staticmethod
+    def _apply_density(report, st, t0=0.0):
+        """Yoğunluk kovalarını rapora yaz — batch ve canlı için tek yerde.
+
+        t0: kovaların sıfırlanacağı referans (canlıda pencere başlangıcı; batch'te
+        zaten videonun başı olduğu için 0)."""
+        dens = st.get("density") or {}
+        if not dens:
+            return
+        report["density_timeline"] = [
+            {"t": round(b - t0, 1), "avg": round(s / max(f, 1), 1)}
+            for b, (s, f) in sorted(dens.items())]
+        report["avg_concurrency"] = round(
+            sum(s for s, _ in dens.values()) / max(sum(f for _, f in dens.values()), 1), 1)
+
     def _step_frame(self, st, dets, t, dtf, b):
         """Kare-başı ölçüm çekirdeği — batch (process_video) ve canlı (stream.py)
         AYNI yolu kullanır; Spec v1.0 davranışı tek yerde yaşar.
@@ -635,6 +650,21 @@ class AttentionEngine:
         mh = st.setdefault("mh", {"det": 0, "dir": 0, "conf_sum": 0.0,
                                   "sig": {"head": 0, "body": 0, "away": 0}})
         ema = st.setdefault("dir_ema", {})
+
+        # --- kalabalik yogunlugu: pik + zaman kovalari ---
+        # Burada tutulur ki canli ile batch AYNI sayiyi uretsin; canli tarafta
+        # bu daha once hic hesaplanmiyordu ve rapor pik=0 basiyordu.
+        st["peak"] = max(st.get("peak", 0), len(dets))
+        dens = st.setdefault("density", {})
+        db = dens.get(b)
+        if db is None:
+            db = dens[b] = [0, 0]
+        db[0] += len(dets)
+        db[1] += 1
+        keep = st.get("density_keep")     # canlida sinirli (bellek); batch'te sinirsiz
+        if keep and len(dens) > keep:
+            for old in sorted(dens)[:len(dens) - keep]:
+                del dens[old]
         for d in dets:
             mh["det"] += 1
             sg = d.get("sig", "away")
@@ -857,8 +887,6 @@ class AttentionEngine:
         persons = {}
         heat = np.zeros((H // 4, W // 4), np.float32)
         timeline = defaultdict(lambda: defaultdict(float))
-        density = defaultdict(lambda: [0, 0])  # bucket -> [sum, frames]
-        peak = 0
         rays = []               # what-if simülasyonu için kayıtlı bakış ışınları
         sim_frame_saved = False
         depth_frames = []       # çoklu-kare derinlik tamponu (≤3 kare, medyan)
@@ -932,10 +960,7 @@ class AttentionEngine:
                     dets, _md = self._drop_mirrored(dets, z_mirror)
                     mirror_dropped += _md
 
-            peak = max(peak, len(dets))
-            b = int(t // 2) * 2
-            density[b][0] += len(dets)
-            density[b][1] += 1
+            b = int(t // 2) * 2   # pik/yoğunluk _step_frame içinde sayılır (ortak yol)
 
             # what-if arka planı: video ~%25'indeyken temiz (overlay'siz) bir kare sakla
             if not sim_frame_saved and t >= duration * 0.25:
@@ -1090,8 +1115,8 @@ class AttentionEngine:
                 sim["s3"] = {"f": round(scene.f, 1), "cx": scene.cx, "cy": scene.cy,
                              "up": [round(float(v), 4) for v in scene.up()],
                              "grid": grid}
-        report = self._report(persons, zs_att, timeline, duration, peak, cost_map or {},
-                              still=False, elapsed=time.time() - t0, sim=sim)
+        report = self._report(persons, zs_att, timeline, duration, st.get("peak", 0),
+                              cost_map or {}, still=False, elapsed=time.time() - t0, sim=sim)
         report["scan_mode"] = "tiled multi-scan (crowd)" if tiled else "single-pass"
         report["calibration"] = self._cal.state()
         if z_staff:
@@ -1155,11 +1180,7 @@ class AttentionEngine:
             report["audience"] = demo.aggregate(persons, zs, self.min_dwell)
         elif demo_note:
             report["audience"] = {"enabled": False, "note": demo_note}
-        if density:
-            report["density_timeline"] = [
-                {"t": b, "avg": round(s / max(f, 1), 1)} for b, (s, f) in sorted(density.items())]
-            report["avg_concurrency"] = round(
-                sum(s for s, _ in density.values()) / max(sum(f for _, f in density.values()), 1), 1)
+        self._apply_density(report, st)
         self._record_dataset(persons, zs_att, report, job.get("id", "job"), "batch")
         return report
 
@@ -1332,40 +1353,62 @@ class AttentionEngine:
             # GÜVEN KAPISI: kalibrasyon güvenilmezse 3D türevli rakamlar RAPORA GİRMEZ
             if not sm.reliable():
                 return
-            # bölge 3D'si + izleme mesafesi (bakanların ortalama ayak konumundan)
-            for z, zr in zip(zs, report["zones"]):
-                q = sm.zone_quad(z)
-                if not q:
-                    continue
-                # Boyut saglamasi (Spec §10 kural 1): retail yuzeyi icin fiziksel
-                # olarak makul olmayan olcu YAYINLANMAZ — uydurmak yerine susulur
-                # ve nedeni raporlanir. Yanlis "4x5m raf" gibi degerler musteri
-                # nezdinde tum raporu supheli hale getiriyordu.
-                wq, hq = float(q["w_m"]), float(q["h_m"])
-                if 0.15 <= wq <= 20.0 and 0.15 <= hq <= 20.0:
-                    zr["size_m"] = [q["w_m"], q["h_m"]]
-                    zr["size_source"] = q.get("depth_source", "depth-map")
-                else:
-                    zr["size_note"] = (f"surface size withheld — implausible "
-                                       f"({wq:.1f}x{hq:.1f} m); depth unreliable here")
-                zr["zone_depth_m"] = q["depth_m"]
-                if q.get("tilt_deg") is not None:
-                    zr["surface_tilt_deg"] = q["tilt_deg"]
-                dists = []
-                for p in persons.values():
-                    if p["dwell"][z["id"]] < self.min_dwell:
-                        continue
-                    fs = p.get("foot_sum")
-                    if not fs or not fs[2]:
-                        continue
-                    pos = sm.person_pos(fs[0] / fs[2], fs[1] / fs[2])
-                    if pos is not None:
-                        import numpy as _np
-                        dists.append(float(_np.linalg.norm(q["center"] - pos)))
-                if dists:
-                    zr["avg_view_distance_m"] = round(sum(dists) / len(dists), 1)
+            self._apply_surface_3d(report, zs, persons, sm)
         except Exception as e:
             report["scene3d"] = {"enabled": False, "note": f"{type(e).__name__}: {e}"}
+
+    def _apply_surface_3d(self, report, zs, persons, sm, quads=None):
+        """Bölge 3D'si + izleme mesafesi — batch ve canlı için TEK yer.
+
+        Canlı taraf bunun bir kopyasını taşıyordu ve kopya avg_view_distance_m'i
+        hiç üretmiyordu; iki yol zamanla birbirinden ayrıldı. Artık ayrılamaz."""
+        for z, zr in zip(zs, report.get("zones", [])):
+            q = quads.get(z["id"]) if quads is not None else sm.zone_quad(z)
+            if not q:
+                continue
+            # Boyut saglamasi (Spec §10 kural 1): retail yuzeyi icin fiziksel
+            # olarak makul olmayan olcu YAYINLANMAZ — uydurmak yerine susulur
+            # ve nedeni raporlanir. Yanlis "4x5m raf" gibi degerler musteri
+            # nezdinde tum raporu supheli hale getiriyordu.
+            wq, hq = float(q["w_m"]), float(q["h_m"])
+            if 0.15 <= wq <= 20.0 and 0.15 <= hq <= 20.0:
+                zr["size_m"] = [q["w_m"], q["h_m"]]
+                zr["size_source"] = q.get("depth_source", "depth-map")
+            else:
+                zr["size_note"] = (f"surface size withheld — implausible "
+                                   f"({wq:.1f}x{hq:.1f} m); depth unreliable here")
+            zr["zone_depth_m"] = q["depth_m"]
+            if q.get("tilt_deg") is not None:
+                zr["surface_tilt_deg"] = q["tilt_deg"]
+            dists = []
+            for p in persons.values():
+                if p["dwell"][z["id"]] < self.min_dwell:
+                    continue
+                fs = p.get("foot_sum")
+                if not fs or not fs[2]:
+                    continue
+                pos = sm.person_pos(fs[0] / fs[2], fs[1] / fs[2])
+                if pos is not None:
+                    dists.append(float(np.linalg.norm(q["center"] - pos)))
+            if dists:
+                zr["avg_view_distance_m"] = round(sum(dists) / len(dists), 1)
+
+    @staticmethod
+    def _apply_benchmark(report, zs_att):
+        """NORMATIF KIYAS: bu yuzey, ayni tipteki yuzeylerin yuzde kacindan iyi?
+
+        Veri setine YAZMADAN yalnizca okur — canli rapor her cekildiginde epizot
+        kaydetmek veri setini sisirirdi. 20 epizodun altinda percentile_rank None
+        doner ve kiyas hic basilmaz (az veriyle konusmama kurali)."""
+        try:
+            from server import dataset
+            for z, zr in zip(zs_att, report.get("zones", [])):
+                if zr.get("avg_dwell"):
+                    pr = dataset.percentile_rank(z["type"], zr["avg_dwell"])
+                    if pr is not None:
+                        zr["benchmark_percentile"] = pr
+        except Exception:
+            pass
 
     # ---------- internals ----------
     def _prep_zones(self, zones, W, H):
@@ -1814,16 +1857,9 @@ class AttentionEngine:
             eps = self._episodes(persons, zs_att, report)
             n = dataset.record(source, kind, report.get("spec", "1.0"), eps)
             report["dataset_episodes"] = n
-            # NORMATIF KIYAS: bu yuzey, ayni tipteki yuzeylerin yuzde kacindan
-            # iyi? Moat'in gorunur hale geldigi yer — ve az veriyle konusmaz:
-            # 20 epizodun altinda percentile_rank None doner, kiyas basilmaz.
-            for z, zr in zip(zs_att, report.get("zones", [])):
-                if zr.get("avg_dwell"):
-                    pr = dataset.percentile_rank(z["type"], zr["avg_dwell"])
-                    if pr is not None:
-                        zr["benchmark_percentile"] = pr
         except Exception:
             pass
+        self._apply_benchmark(report, zs_att)
 
     def _sig_share(self, persons, zid):
         tot = defaultdict(float)

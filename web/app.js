@@ -530,6 +530,110 @@ window.oculiqLoadReport = loadReport; // dış erişim: rapor deep-link / debug
 
 const fmt = (n, d = 0) => Number(n).toLocaleString("en-US", { maximumFractionDigits: d, minimumFractionDigits: d });
 
+/* ---------- ortak rapor blokları ----------
+   Video ve canlı rapor AYNI bloklardan kurulur. Daha önce canlı tarafın kendi
+   küçük renderer'ı vardı ve videoya eklenen her yeni ölçüm (3D kalibrasyon
+   asistanı, ziyaret histogramı, vitrin dönüşümü, benchmark) canlıda sessizce
+   eksik kalıyordu. Tek kaynak → sapma imkânsız. */
+function linesHtml(rep) {
+  let h = "";
+  if (rep.lines && rep.lines.length) {
+    h += `<div class="wide-chart"><h4>Entrance counting <span class="new-tag">NEW</span> — line crossings by tracked foot position (Spec v1.0 §5)</h4>
+      <div class="cpm-row">` + rep.lines.map((l) => `
+        <div class="cpm-box"><div class="k">${esc(l.label)}</div>
+          <div class="v">${l.enters} in · ${l.exits} out</div>
+          <div class="k">capture rate ${fmt(l.capture_rate, 1)}%${l.capture_rate_ci ? " · 95% CI " + l.capture_rate_ci[0] + "–" + l.capture_rate_ci[1] + "%" : ""}</div>
+        </div>`).join("") + `</div></div>`;
+  }
+  if (rep.lines_note) {
+    h += `<div class="wide-chart"><h4>Entrance counting</h4><p class="aud-note">${esc(rep.lines_note)}</p></div>`;
+  }
+  return h;
+}
+
+function visitsHtml(rep) {
+  if (!rep.visits) return "";
+  if (!rep.visits.enabled) {
+    return `<div class="wide-chart"><h4>Visit analytics <span class="new-tag">ADD-ON</span></h4>
+      <p class="aud-note">${esc(rep.visits.note || "")}</p></div>`;
+  }
+  const rows = (rep.visits.lines || []).map((l) => {
+    // Vitrin dönüşümü ve "ziyaret nerede bitti" eşleşen ziyaretten BAĞIMSIZ ölçülür:
+    // biri kapıdan girip henüz çıkmamışken visits=0 olur ama bakış→giriş verisi
+    // vardır. Eskiden bu blok erken dönüşle tamamen yutuluyordu.
+    const conv = (l.window_conversion || []).map((w) => `<div class="wconv"><b>${esc(w.label)}</b>
+      <span>${w.lookers} looked → ${w.entered_after_looking} came in</span>
+      <i>${fmt(w.conversion_rate, 0)}%</i></div>`).join("");
+    if (!l.visits) {
+      return `<div class="visit-block"><b>${esc(l.label)}</b>
+        <p class="aud-note">No completed visits yet — ${l.unmatched_enters} ${l.unmatched_enters === 1 ? "entry has" : "entries have"} no matching exit (still inside, or left by another door). Stay length is withheld until a visit closes; it is never estimated.</p>
+        ${conv}</div>`;
+    }
+    const hist = (l.duration_histogram || []).map((n, i) => {
+      const lbl = ["&lt;15s", "15–60s", "1–3m", "3–10m", "10m+"][i];
+      const pct = Math.round(n / l.visits * 100);
+      return `<div class="vh-bar"><span>${lbl}</span><i style="width:${pct}%"></i><b>${n}</b></div>`;
+    }).join("");
+    return `<div class="visit-block"><b>${esc(l.label)}</b>
+      <div class="cpm-row">
+        <div class="cpm-box"><div class="k">Visits</div><div class="v">${l.visits}</div></div>
+        <div class="cpm-box"><div class="k">Median stay</div><div class="v">${fmt(l.median_duration_s, 0)}<small>s</small></div></div>
+        <div class="cpm-box"><div class="k">Engaged</div><div class="v">${fmt(l.engaged_rate, 0)}<small>%</small></div></div>
+        <div class="cpm-box hero"><div class="k">Left without engaging &lt;${l.bounce_threshold_s}s</div><div class="v">${fmt(l.bounce_rate, 0)}<small>%</small></div></div>
+      </div>
+      <div class="vh">${hist}</div>
+      ${l.last_surface_before_exit ? `<div class="wconv"><b>Where visits ended</b>
+        <span>${l.last_surface_before_exit.slice(0,3).map((a) => esc(a.label) + " (" + a.visits + ")").join(" · ")}</span></div>` : ""}
+      ${conv}
+      <p class="aud-note">Median ${fmt(l.median_duration_s, 0)}s · p90 ${fmt(l.p90_duration_s, 0)}s · avg ${fmt(l.avg_duration_s, 0)}s.
+      ${l.unmatched_enters ? l.unmatched_enters + " entries had no matching exit (still inside, or left by another door) — counted separately, never guessed." : ""}</p>
+    </div>`;
+  }).join("");
+  return `<div class="wide-chart"><h4>Visit analytics <span class="new-tag">ADD-ON</span> — storefront funnel</h4>${rows}</div>`;
+}
+
+function diag3dHtml(rep) {
+  const dg = rep.scene3d && rep.scene3d.diagnosis;
+  if (!dg || !dg.findings || !dg.findings.length) return "";
+  const lvl = { ok: "", weak: "3D active with caveats", failed: "3D withheld — using 2.5D" }[dg.level] || "";
+  const rows = dg.findings.map((f) => {
+    const bad = f.severity === "blocker";
+    return `<div class="diag-row"><span class="diag-sev ${bad ? "bad" : "warn"}">${bad ? "blocker" : "check"}</span>
+      <div><b>${esc(f.what)}</b><small>${esc(f.fix)}</small></div></div>`;
+  }).join("");
+  return `<div class="wide-chart"><h4>3D calibration assistant <span class="new-tag">SETUP</span>${lvl ? " — " + lvl : ""}</h4>
+    ${rows}
+    <p class="aud-note">Each item lists what the calibration measured and what to change on site. Fixing them raises the confidence score that gates 3D results.</p></div>`;
+}
+
+function healthHtml(rep) {
+  if (!rep.measurement_health) return "";
+  const h = rep.measurement_health, sm = h.signal_mix || {};
+  const chip = (k, v, warn) =>
+    `<span class="lv-kpi" ${warn ? 'style="color:var(--danger)"' : ""}><b>${v}</b> <small>${k}</small></span>`;
+  return `<div class="wide-chart"><h4>Measurement health <span class="new-tag">TRANSPARENCY</span> — a weak scene is disclosed, never hidden (Spec §10)</h4>
+    <div class="cam-live" style="margin-top:4px">
+      ${chip("direction signal", fmt(h.direction_share, 0) + "%", h.direction_share < 60)}
+      ${chip("head / body / away", `${fmt(sm.head, 0)} / ${fmt(sm.body, 0)} / ${fmt(sm.away, 0)}%`, (sm.away || 0) > 30)}
+      ${chip("detector confidence", fmt(h.avg_det_conf, 2), h.avg_det_conf < 0.4)}
+      ${chip("tracks", `${h.tracks_seen} seen · ${h.tracks_stitched} stitched · ${h.ghosts_dropped} ghosts`, false)}
+      ${chip("3D gaze path", fmt(h.gaze3d_pct, 0) + "%", false)}
+    </div></div>`;
+}
+
+function sharedBlocks(rep) {
+  let h = linesHtml(rep);
+  if (rep.mirror_dropped_samples) {
+    h += `<div class="wide-chart"><h4>Mirror / glass exclusion <span class="new-tag">NEW</span></h4>
+      <p class="aud-note">${rep.mirror_dropped_samples} detection samples inside the marked mirror/glass areas were discarded — reflections would otherwise inflate traffic and create phantom looks.</p></div>`;
+  }
+  h += visitsHtml(rep) + diag3dHtml(rep) + healthHtml(rep);
+  if (rep.reach_note) {
+    h += `<div class="wide-chart"><h4>Shelf interaction</h4><p class="aud-note">${esc(rep.reach_note)}</p></div>`;
+  }
+  return h;
+}
+
 function renderReport(rep, jobId) {
   const dlHref = rep.still ? `/api/jobs/${jobId}/image` : `/api/jobs/${jobId}/video`;
   const dlLabel = rep.still ? "Download annotated image" : "Download annotated video";
@@ -559,87 +663,7 @@ function renderReport(rep, jobId) {
     <div class="kpi"><div class="k">Zones analyzed</div><div class="v" data-count="${rep.zones.length}">0</div></div>
   </div>`;
 
-  if (rep.lines && rep.lines.length) {
-    html += `<div class="wide-chart"><h4>Entrance counting <span class="new-tag">NEW</span> — line crossings by tracked foot position (Spec v1.0 §5)</h4>
-      <div class="cpm-row">` + rep.lines.map((l) => `
-        <div class="cpm-box"><div class="k">${esc(l.label)}</div>
-          <div class="v">${l.enters} in · ${l.exits} out</div>
-          <div class="k">capture rate ${fmt(l.capture_rate, 1)}%${l.capture_rate_ci ? " · 95% CI " + l.capture_rate_ci[0] + "–" + l.capture_rate_ci[1] + "%" : ""}</div>
-        </div>`).join("") + `</div></div>`;
-  }
-  if (rep.lines_note) {
-    html += `<div class="wide-chart"><h4>Entrance counting</h4><p class="aud-note">${esc(rep.lines_note)}</p></div>`;
-  }
-
-  if (rep.mirror_dropped_samples) {
-    html += `<div class="wide-chart"><h4>Mirror / glass exclusion <span class="new-tag">NEW</span></h4>
-      <p class="aud-note">${rep.mirror_dropped_samples} detection samples inside the marked mirror/glass areas were discarded — reflections would otherwise inflate traffic and create phantom looks.</p></div>`;
-  }
-
-  if (rep.visits) {
-    if (!rep.visits.enabled) {
-      html += `<div class="wide-chart"><h4>Visit analytics <span class="new-tag">ADD-ON</span></h4>
-        <p class="aud-note">${esc(rep.visits.note || "")}</p></div>`;
-    } else {
-      const rows = (rep.visits.lines || []).map((l) => {
-        if (!l.visits) {
-          return `<div class="diag-row"><div><b>${esc(l.label)}</b><small>No matched visits — ${l.unmatched_enters} entries had no exit in this footage.</small></div></div>`;
-        }
-        const hist = (l.duration_histogram || []).map((n, i) => {
-          const lbl = ["&lt;15s", "15–60s", "1–3m", "3–10m", "10m+"][i];
-          const pct = Math.round(n / l.visits * 100);
-          return `<div class="vh-bar"><span>${lbl}</span><i style="width:${pct}%"></i><b>${n}</b></div>`;
-        }).join("");
-        return `<div class="visit-block"><b>${esc(l.label)}</b>
-          <div class="cpm-row">
-            <div class="cpm-box"><div class="k">Visits</div><div class="v">${l.visits}</div></div>
-            <div class="cpm-box"><div class="k">Median stay</div><div class="v">${fmt(l.median_duration_s, 0)}<small>s</small></div></div>
-            <div class="cpm-box"><div class="k">Engaged</div><div class="v">${fmt(l.engaged_rate, 0)}<small>%</small></div></div>
-            <div class="cpm-box hero"><div class="k">Left without engaging &lt;${l.bounce_threshold_s}s</div><div class="v">${fmt(l.bounce_rate, 0)}<small>%</small></div></div>
-          </div>
-          <div class="vh">${hist}</div>
-          ${l.last_surface_before_exit ? `<div class="wconv"><b>Where visits ended</b>
-            <span>${l.last_surface_before_exit.slice(0,3).map((a) => esc(a.label) + " (" + a.visits + ")").join(" · ")}</span></div>` : ""}
-          ${(l.window_conversion || []).map((w) => `<div class="wconv"><b>${esc(w.label)}</b>
-            <span>${w.lookers} looked → ${w.entered_after_looking} came in</span>
-            <i>${fmt(w.conversion_rate, 0)}%</i></div>`).join("")}
-          <p class="aud-note">Median ${fmt(l.median_duration_s, 0)}s · p90 ${fmt(l.p90_duration_s, 0)}s · avg ${fmt(l.avg_duration_s, 0)}s.
-          ${l.unmatched_enters ? l.unmatched_enters + " entries had no matching exit (still inside, or left by another door) — counted separately, never guessed." : ""}</p>
-        </div>`;
-      }).join("");
-      html += `<div class="wide-chart"><h4>Visit analytics <span class="new-tag">ADD-ON</span> — storefront funnel</h4>${rows}</div>`;
-    }
-  }
-
-  const dg = rep.scene3d && rep.scene3d.diagnosis;
-  if (dg && dg.findings && dg.findings.length) {
-    const lvl = { ok: "", weak: "3D active with caveats", failed: "3D withheld — using 2.5D" }[dg.level] || "";
-    const rows = dg.findings.map((f) => {
-      const bad = f.severity === "blocker";
-      return `<div class="diag-row"><span class="diag-sev ${bad ? "bad" : "warn"}">${bad ? "blocker" : "check"}</span>
-        <div><b>${esc(f.what)}</b><small>${esc(f.fix)}</small></div></div>`;
-    }).join("");
-    html += `<div class="wide-chart"><h4>3D calibration assistant <span class="new-tag">SETUP</span>${lvl ? " — " + lvl : ""}</h4>
-      ${rows}
-      <p class="aud-note">Each item lists what the calibration measured and what to change on site. Fixing them raises the confidence score that gates 3D results.</p></div>`;
-  }
-
-  if (rep.measurement_health) {
-    const h = rep.measurement_health, sm = h.signal_mix || {};
-    const chip = (k, v, warn) =>
-      `<span class="lv-kpi" ${warn ? 'style="color:var(--danger)"' : ""}><b>${v}</b> <small>${k}</small></span>`;
-    html += `<div class="wide-chart"><h4>Measurement health <span class="new-tag">TRANSPARENCY</span> — a weak scene is disclosed, never hidden (Spec §10)</h4>
-      <div class="cam-live" style="margin-top:4px">
-        ${chip("direction signal", fmt(h.direction_share, 0) + "%", h.direction_share < 60)}
-        ${chip("head / body / away", `${fmt(sm.head, 0)} / ${fmt(sm.body, 0)} / ${fmt(sm.away, 0)}%`, (sm.away || 0) > 30)}
-        ${chip("detector confidence", fmt(h.avg_det_conf, 2), h.avg_det_conf < 0.4)}
-        ${chip("tracks", `${h.tracks_seen} seen · ${h.tracks_stitched} stitched · ${h.ghosts_dropped} ghosts`, false)}
-        ${chip("3D gaze path", fmt(h.gaze3d_pct, 0) + "%", false)}
-      </div></div>`;
-  }
-  if (rep.reach_note) {
-    html += `<div class="wide-chart"><h4>Shelf interaction</h4><p class="aud-note">${esc(rep.reach_note)}</p></div>`;
-  }
+  html += sharedBlocks(rep);
 
   html += densitySvg(rep);
   if (rep.scene3d && rep.scene3d.enabled) {
@@ -1226,7 +1250,7 @@ function sigMixHtml(z) {
     </div></div>`;
 }
 
-function zoneReport(z, still) {
+function zoneReport(z, still, live) {
   const aqsC = 2 * Math.PI * 19;
   return `
   <div class="zone-report">
@@ -1281,18 +1305,25 @@ function zoneReport(z, still) {
     <div class="evidence">
       <h4>Evidence <span class="new-tag">AUDITABLE</span></h4>
       <div class="ev-chips">${z.evidence.map((e) =>
-        `<button class="ev-chip" data-t="${e.start}">#${e.pid} · ${e.dur}s @ ${tstamp(e.start)}</button>`).join("")}</div>
+        evChip(e.start, `#${e.pid} · ${e.dur}s @ ${tstamp(e.start)}`, live)).join("")}</div>
+      ${live ? '<p class="aud-note">Timestamps are seconds into the current live window. Live mode records no footage, so there is no clip to replay — the audit trail is the log, not a video.</p>' : ""}
     </div>` : ""}
     ${!still && z.reach_evidence && z.reach_evidence.length ? `
     <div class="evidence">
       <h4>Reach evidence <span class="new-tag">AUDITABLE</span></h4>
       <div class="ev-chips">${z.reach_evidence.map((e) =>
-        `<button class="ev-chip" data-t="${e.t}">reach #${e.pid} @ ${tstamp(e.t)}</button>`).join("")}</div>
+        evChip(e.t, `reach #${e.pid} @ ${tstamp(e.t)}`, live)).join("")}</div>
     </div>` : ""}
   </div>`;
 }
 
 const tstamp = (s) => `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStart(2, "0")}`;
+
+// Canlıda oynatılacak kayıt yok: kanıt satırı tıklanmaz bir etiket olarak basılır.
+// Tıklanan ama hiçbir şey yapmayan bir düğme koymak kullanıcıyı yanıltırdı.
+const evChip = (t, label, live) => live
+  ? `<span class="ev-chip is-static">${label}</span>`
+  : `<button class="ev-chip" data-t="${t}">${label}</button>`;
 
 const fstage = (label, v, base, extra) =>
   `<div class="fstage"><span class="fl">${label}</span><div class="fb"><div data-w="${base ? Math.round((v / base) * 100) : 0}"></div></div><span class="fv">${fmt(v)} <small>${extra}</small></span></div>`;
@@ -1347,10 +1378,45 @@ function download(name, text, mime) {
 }
 
 function toCsv(rep) {
+  // Not: kolonlar rapordaki ölçümlerle birlikte büyür. Eskiden reach/hesitation/
+  // benchmark gibi yeni metrikler ekranda vardı ama CSV'ye hiç düşmüyordu —
+  // müşteri dışa aktardığında raporun yarısını kaybediyordu.
   const cols = ["label", "type", "traffic", "impressions", "attention_rate", "attentive_seconds",
     "avg_dwell", "max_dwell", "engaged", "deep", "time_to_first_look", "glances_per_looker",
-    "stopping_power", "aqs", "cost", "reach_cpm", "attention_cpm"];
-  return [cols.join(","), ...rep.zones.map((z) => cols.map((c) => z[c] ?? "").join(","))].join("\n");
+    "stopping_power", "reaches", "reachers", "reach_rate", "hesitations", "hesitation_rate",
+    "benchmark_percentile", "zone_depth_m", "avg_view_distance_m",
+    "aqs", "cost", "reach_cpm", "attention_cpm"];
+  const cell = (v) => {
+    if (v == null) return "";
+    const s = String(v);
+    return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+  };
+  const out = [
+    `# Oculiq ${rep.mode === "live" ? "live window" : "video analysis"} · spec ${rep.spec || "1.0"} · ${rep.scan_mode || ""}`,
+    `# traffic,${rep.traffic},peak_concurrency,${rep.peak_concurrency ?? ""},avg_concurrency,${rep.avg_concurrency ?? ""},capture_rate,${rep.capture_rate ?? ""}`,
+    "", "# zones", cols.join(","),
+    ...rep.zones.map((z) => cols.map((c) => cell(z[c])).join(",")),
+  ];
+  if (rep.lines && rep.lines.length) {
+    out.push("", "# entrances", "label,enters,exits,capture_rate");
+    for (const l of rep.lines) out.push([cell(l.label), l.enters, l.exits, l.capture_rate].join(","));
+  }
+  const vl = rep.visits && rep.visits.enabled ? rep.visits.lines || [] : [];
+  if (vl.length) {
+    out.push("", "# visits", "label,visits,unmatched_enters,median_duration_s,p90_duration_s,engaged_rate,bounce_rate");
+    for (const l of vl) {
+      out.push([cell(l.label), l.visits, l.unmatched_enters, cell(l.median_duration_s),
+        cell(l.p90_duration_s), cell(l.engaged_rate), cell(l.bounce_rate)].join(","));
+    }
+    const conv = vl.flatMap((l) => l.window_conversion || []);
+    if (conv.length) {
+      out.push("", "# window conversion", "surface,lookers,entered_after_looking,conversion_rate");
+      for (const w of conv) {
+        out.push([cell(w.label), w.lookers, w.entered_after_looking, cell(w.conversion_rate)].join(","));
+      }
+    }
+  }
+  return out.join("\n");
 }
 
 /* ================= LIVE (Faz 2): continuous measurement ================= */
@@ -1440,16 +1506,24 @@ async function lvFullReport(cam) {
   $("lvrName").textContent = cam.name || cam.id;
   box.innerHTML = '<p class="aud-note">Loading current window…</p>';
   $("lvReportModal").classList.remove("hidden");
+  let rep;
   try {
-    const [rep, hourly] = await Promise.all([
-      (await fetch(`/api/cameras/${cam.id}/report`)).json(),
-      (await fetch(`/api/cameras/${cam.id}/hourly`)).json().catch(() => null),
-    ]);
-    if (rep.detail) { box.innerHTML = `<p class="aud-note">${esc(rep.detail)}</p>`; return; }
-    box.innerHTML = lvReportHtml(rep) + hourlyHtml(hourly);
-  } catch (e) {
+    rep = await (await fetch(`/api/cameras/${cam.id}/report`)).json();
+  } catch {
     box.innerHTML = '<p class="aud-note">Could not load the live report.</p>';
+    return;
   }
+  if (rep.detail) { box.innerHTML = `<p class="aud-note">${esc(rep.detail)}</p>`; return; }
+  // Saat profili AYRI çekilir: o uç patlarsa tüm rapor düşmemeli — eskiden
+  // hourly'deki bir hata canlı raporun tamamını "yüklenemedi"ye çeviriyordu.
+  let hourly = null;
+  try { hourly = await (await fetch(`/api/cameras/${cam.id}/hourly`)).json(); } catch { }
+  box.innerHTML = lvReportHtml(rep) + hourlyHtml(hourly);
+  const stamp = new Date().toISOString().slice(0, 16).replace(/[:T]/g, "-");
+  $("lvDlJson").onclick = () =>
+    download(`oculiq-live-${cam.id}-${stamp}.json`, JSON.stringify(rep, null, 2), "application/json");
+  $("lvDlCsv").onclick = () =>
+    download(`oculiq-live-${cam.id}-${stamp}.csv`, toCsv(rep), "text/csv");
 }
 $("lvrClose").onclick = () => $("lvReportModal").classList.add("hidden");
 
@@ -1473,39 +1547,29 @@ function hourlyHtml(h) {
 }
 
 function lvReportHtml(rep) {
-  const mh = rep.measurement_health || {};
-  const kpi = (k, v) => `<div class="kpi"><div class="k">${k}</div><div class="v">${v}</div></div>`;
-  let h = `<div class="kpi-grid">
-    ${kpi("Passersby (traffic)", rep.traffic)}
-    ${rep.capture_rate != null ? kpi("Capture rate", fmt(rep.capture_rate, 1) + "<small>%</small>") : ""}
-    ${kpi("Window", Math.round((rep.duration || 0) / 60) + "<small> min</small>")}
-    ${kpi("Scan mode", `<small>${esc(rep.scan_mode || "")}</small>`)}
+  const started = rep.window_started ? new Date(rep.window_started * 1000) : null;
+  let h = `<div class="rep-head" style="padding:0 0 10px">
+    <div>
+      <span class="badge"><span class="dot-live"></span>live · measured on-device</span>
+      <div class="sub">${esc(rep.method || "")} · ${esc(rep.scan_mode || "")}${rep.scene3d && rep.scene3d.enabled ? " · 3D scene (" + fmt(rep.scene3d.calib_confidence, 0) + "% conf)" : ""}
+        · window open ${fmt((rep.duration || 0) / 60, 0)} min${started ? " since " + started.toLocaleTimeString() : ""}</div>
+    </div>
+    <div class="rep-actions"><button id="lvDlJson">JSON</button><button id="lvDlCsv">CSV</button></div>
+  </div>
+  <div class="kpi-grid">
+    <div class="kpi"><div class="k">Passersby (traffic)</div><div class="v">${rep.traffic}</div></div>
+    <div class="kpi"><div class="k">Peak concurrency</div><div class="v">${rep.peak_concurrency}</div></div>
+    ${rep.avg_concurrency != null ? `<div class="kpi"><div class="k">Avg crowd density</div><div class="v">${fmt(rep.avg_concurrency, 1)}<small> ppl</small></div></div>` : ""}
+    ${rep.capture_rate != null ? `<div class="kpi"><div class="k">Capture rate <span class="new-tag">NEW</span></div><div class="v">${fmt(rep.capture_rate, 1)}<small>%</small></div></div>` : ""}
+    ${rep.scene3d && rep.scene3d.enabled ? `<div class="kpi"><div class="k">3D calibration <span class="new-tag">SCENE</span></div><div class="v">${fmt(rep.scene3d.calib_confidence, 0)}<small>% conf${rep.scene3d.camera_height_m ? " · cam " + fmt(rep.scene3d.camera_height_m, 1) + "m" : ""}</small></div></div>` : ""}
+    ${rep.zones && rep.zones.length ? `<div class="kpi"><div class="k">Best zone (AQS)</div><div class="v">${esc(best(rep).label)} <small>${best(rep).aqs}</small></div></div>` : ""}
+    <div class="kpi"><div class="k">Zones analyzed</div><div class="v">${(rep.zones || []).length}</div></div>
   </div>`;
-  for (const z of rep.zones || []) {
-    h += `<div class="visit-block"><b>${esc(z.label)}</b> <small style="color:var(--muted)">${esc(z.type)}</small>
-      <div class="cpm-row">
-        <div class="cpm-box"><div class="k">Attention rate</div><div class="v">${fmt(z.attention_rate, 1)}<small>%</small></div></div>
-        <div class="cpm-box"><div class="k">Impressions</div><div class="v">${z.impressions}</div></div>
-        <div class="cpm-box"><div class="k">AQS</div><div class="v">${fmt(z.aqs, 0)}</div></div>
-        ${z.hesitations != null ? `<div class="cpm-box hero"><div class="k">Hesitation</div><div class="v">${fmt(z.hesitation_rate, 0)}<small>%</small></div></div>` : ""}
-      </div>
-      <p class="aud-note">${z.size_m ? `Surface ${fmt(z.size_m[0],1)}×${fmt(z.size_m[1],1)} m @ ${z.zone_depth_m} m${z.size_source === "ground-anchored" ? " (ground-anchored)" : ""} · ` : ""}
-        avg dwell ${fmt(z.avg_dwell, 1)}s · TTFL ${z.time_to_first_look != null ? fmt(z.time_to_first_look, 1) + "s" : "—"}${z.reaches != null ? " · " + z.reaches + " reaches" : ""}</p>
-    </div>`;
-  }
-  for (const l of rep.lines || []) {
-    h += `<div class="wconv"><b>${esc(l.label)}</b><span>${l.enters} in · ${l.exits} out</span><i>${fmt(l.capture_rate, 0)}%</i></div>`;
-  }
-  if (rep.visits && rep.visits.enabled) {
-    for (const l of rep.visits.lines || []) {
-      h += `<div class="wconv"><b>Visits — ${esc(l.label)}</b><span>${l.visits} matched · ${l.unmatched_enters} unmatched${l.bounce_rate != null ? " · " + fmt(l.bounce_rate, 0) + "% left <30s" : ""}</span></div>`;
-    }
-  }
-  h += `<div class="wide-chart" style="margin-top:12px"><h4>Measurement health</h4>
-    <div class="cam-live"><span class="lv-kpi"><b>${fmt(mh.direction_share, 0)}%</b> <small>direction signal</small></span>
-      <span class="lv-kpi"><b>${fmt(mh.gaze3d_pct, 0)}%</b> <small>3D gaze path</small></span>
-      <span class="lv-kpi"><b>${fmt(mh.avg_det_conf, 2)}</b> <small>detector conf</small></span></div>
-    <p class="aud-note">${esc(rep.live_limits || "")}</p></div>`;
+  h += sharedBlocks(rep);          // video raporuyla birebir aynı bloklar
+  h += densitySvg(rep);
+  h += glossaryHtml();
+  for (const z of rep.zones || []) h += zoneReport(z, false, true);
+  h += `<p class="dl-note">${esc(rep.live_limits || "")}</p>`;
   return h;
 }
 

@@ -359,6 +359,9 @@ button.sm { padding: 7px 13px; font-size: 12.5px; }
   transition: border-color .15s, background .15s;
 }
 .ev-chip:hover { border-color: #fff; background: var(--glass); }
+/* canlıda oynatılacak kayıt yok: aynı çip tıklanamaz bir etiket olarak basılır */
+.ev-chip.is-static { cursor: default; color: var(--muted); display: inline-block; }
+.ev-chip.is-static:hover { border-color: var(--border); background: rgba(255,255,255,.04); }
 
 .player-section { border: 1px solid var(--border); border-radius: 2px; padding: 18px 20px; margin-bottom: 14px; animation: rise .3s ease; }
 .player-section h3 { margin: 0 0 12px; font-size: 16px; font-weight: 400; }
