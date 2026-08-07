@@ -505,7 +505,9 @@ async function loadReport(jobId) {
   const rep = await (await fetch(`/api/jobs/${jobId}/report`)).json();
   renderReport(rep, jobId);
   goto("report");
-  requestAnimationFrame(() => requestAnimationFrame(animateReport));
+  // NOT: animateReport'u doğrudan rAF'a vermeyin — rAF geri çağrıya zaman
+  // damgası geçirir ve bu, root parametresinin yerine geçerdi.
+  requestAnimationFrame(() => requestAnimationFrame(() => animateReport()));
   addPortfolioBadges(rep);
 }
 
@@ -1355,8 +1357,11 @@ function histSvg(z) {
   }).join("") + `</svg>`;
 }
 
-function animateReport() {
-  document.querySelectorAll("[data-count]").forEach((el) => {
+// root: hangi ağacın canlandırılacağı. Canlı rapor modalı da zoneReport'u
+// kullandığı için AQS halkası ve huni çubukları orada da doldurulmalı —
+// çağrılmadığında halka boş, çubuklar sıfır genişlikte kalıyordu.
+function animateReport(root = document) {
+  root.querySelectorAll("[data-count]").forEach((el) => {
     const target = parseFloat(el.dataset.count);
     const t0 = performance.now();
     const tick = (t) => {
@@ -1366,8 +1371,8 @@ function animateReport() {
     };
     requestAnimationFrame(tick);
   });
-  document.querySelectorAll(".fb > div, .cmp-bar .track > div").forEach((el) => { el.style.width = el.dataset.w + "%"; });
-  document.querySelectorAll("[data-aqs]").forEach((el) => { el.style.strokeDashoffset = el.dataset.aqs; });
+  root.querySelectorAll(".fb > div, .cmp-bar .track > div").forEach((el) => { el.style.width = el.dataset.w + "%"; });
+  root.querySelectorAll("[data-aqs]").forEach((el) => { el.style.strokeDashoffset = el.dataset.aqs; });
 }
 
 function download(name, text, mime) {
@@ -1519,6 +1524,7 @@ async function lvFullReport(cam) {
   let hourly = null;
   try { hourly = await (await fetch(`/api/cameras/${cam.id}/hourly`)).json(); } catch { }
   box.innerHTML = lvReportHtml(rep) + hourlyHtml(hourly);
+  requestAnimationFrame(() => requestAnimationFrame(() => animateReport(box)));
   const stamp = new Date().toISOString().slice(0, 16).replace(/[:T]/g, "-");
   $("lvDlJson").onclick = () =>
     download(`oculiq-live-${cam.id}-${stamp}.json`, JSON.stringify(rep, null, 2), "application/json");
