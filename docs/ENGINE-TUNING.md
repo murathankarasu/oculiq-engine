@@ -48,6 +48,40 @@ So the widestore question stands open: this dataset gives no evidence either
 way on whether 18 or 28 is closer. The regression band remains wide because we
 do not know, not because we measured that we should.
 
+### Can we raise recall? Measured, and the answer is no — not by tuning
+
+Recall of 82% means one person in six is missed at this density, so we swept the
+parameters that plausibly control it:
+
+| Setting | Precision | Recall | F1 |
+|---|---|---|---|
+| conf 0.25, imgsz 960, tile 800 *(current)* | 78.4% | 82.3% | 80.3% |
+| conf 0.15, imgsz 960, tile 800 | 78.4% | 82.3% | 80.3% |
+| conf 0.25, imgsz 1280, tile 800 | 78.5% | 82.5% | 80.5% |
+| conf 0.15, imgsz 1280, tile 640 | 78.5% | 82.5% | 80.5% |
+
+Nothing moves. Lowering the detection threshold changes nothing at all;
+doubling resolution buys 0.2 points. **The bottleneck is not the settings**, so
+no parameter change was made — a config churn that buys 0.2 points on one street
+clip is noise dressed as progress.
+
+### What we actually miss
+
+| | Detected | Missed |
+|---|---|---|
+| Median visibility | 0.80 | **0.46** |
+| Median box height | 192 px | 122 px |
+
+- **57% of the misses are heavily occluded** (under 50% visible).
+- **0% are too small** — size is not the problem at all.
+
+So the missing sixth is mostly people standing behind other people. That matters
+less than the raw number suggests: a person whose body is half hidden has no
+readable head or shoulder direction either, so they could not contribute an
+attention measurement even if we detected them. The honest reading is that we
+are near the practical ceiling for this density, not that we have a fixable
+detector gap. A retail interior — sparser than MOT20 — should sit better.
+
 ### Limits of this run, stated plainly
 
 1. **12 scored frames is a small sample.** Treat the percentages as indicative,
