@@ -116,3 +116,25 @@ Queue management, staff scheduling, occupancy/safety limits, POS conversion.
 They are the RetailNext/Sensormatic ring: commodity, hardware-partnered, priced
 down. Each would pull the product toward operations analytics and away from the
 measurement position we are building.
+
+---
+
+## On public datasets (what they can and cannot settle)
+
+Public sets are useful for tuning the engine, not for the accuracy claim.
+
+| Question | Public data can answer it? |
+|---|---|
+| Do we detect and count people correctly? | **Yes** — MOT-format pedestrian sets (`tools/eval_mot.py`). This settles the traffic denominator, our largest open uncertainty. |
+| Do we track identities stably? | Partly — same sets, ID metrics. |
+| Do we detect a reach at a shelf? | Partly — shopper-action sets label reach/retract. |
+| **Is "looked at that surface" correct?** | **No.** No public pedestrian dataset labels gaze against a declared surface, and that is the metric we sell. |
+
+Two consequences we hold to:
+
+1. The published accuracy figure must come from footage we have permission to
+   use. Research sets are almost always research-only; a company selling audit
+   trust cannot base its evidence file on a licence it is breaching.
+2. Even with a permissive licence, the core claim would still be unproven,
+   because the label we need does not exist in them. `tools/labeler.html` stays
+   on the critical path.
