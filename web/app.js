@@ -1441,14 +1441,36 @@ async function lvFullReport(cam) {
   box.innerHTML = '<p class="aud-note">Loading current window…</p>';
   $("lvReportModal").classList.remove("hidden");
   try {
-    const rep = await (await fetch(`/api/cameras/${cam.id}/report`)).json();
+    const [rep, hourly] = await Promise.all([
+      (await fetch(`/api/cameras/${cam.id}/report`)).json(),
+      (await fetch(`/api/cameras/${cam.id}/hourly`)).json().catch(() => null),
+    ]);
     if (rep.detail) { box.innerHTML = `<p class="aud-note">${esc(rep.detail)}</p>`; return; }
-    box.innerHTML = lvReportHtml(rep);
+    box.innerHTML = lvReportHtml(rep) + hourlyHtml(hourly);
   } catch (e) {
     box.innerHTML = '<p class="aud-note">Could not load the live report.</p>';
   }
 }
 $("lvrClose").onclick = () => $("lvReportModal").classList.add("hidden");
+
+function hourlyHtml(h) {
+  if (!h || !h.hours || !h.hours.length) return "";
+  const rated = h.hours.filter((r) => r.capture_rate != null);
+  const max = Math.max(1, ...h.hours.map((r) => r.traffic));
+  const bars = h.hours.map((r) => {
+    const pct = Math.round(r.traffic / max * 100);
+    const weak = h.weakest_hour === r.hour;
+    return `<div class="vh-bar"><span>${String(r.hour).padStart(2, "0")}:00</span>
+      <i style="width:${pct}%${weak ? ";background:var(--danger)" : ""}"></i>
+      <b>${r.capture_rate != null ? fmt(r.capture_rate, 0) + "% capture" : "—"}</b></div>`;
+  }).join("");
+  const head = h.weakest_hour != null
+    ? `Weakest hour: <b>${String(h.weakest_hour).padStart(2, "0")}:00</b> at ${fmt(h.weakest_capture_rate, 0)}% capture`
+    : "Not enough hours with 20+ people yet to name a weakest hour.";
+  return `<div class="wide-chart" style="margin-top:12px"><h4>Hour of day <span class="new-tag">NEW</span> — last ${h.days} days</h4>
+    <p class="aud-note">${head}</p><div class="vh">${bars}</div>
+    <p class="aud-note">Bars show people seen; the label is capture rate. Hours with fewer than 20 people show no rate — a "0% capture" from three passers-by would send someone chasing a problem that isn't there.</p></div>`;
+}
 
 function lvReportHtml(rep) {
   const mh = rep.measurement_health || {};

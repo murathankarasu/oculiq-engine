@@ -81,8 +81,10 @@ the measurement and the comparison that produced it, or it is horoscope.
   the drop starts Tuesday, when the window display changed." Withhold the
   recommendation when the sample is too small to support it, exactly as we
   withhold implausible surface sizes today.
-- **Time-of-day view** — the hour where capture rate collapses is usually a
-  staffing or display problem, and it is invisible in a daily total.
+- **Time-of-day view** — SHIPPED. Hourly capture/attention profile over the last
+  N days with the weakest hour named (`/api/cameras/{id}/hourly`, shown in the
+  live report). Hours with fewer than 20 people show no rate: a "0% capture"
+  from three passers-by would send someone chasing a problem that isn't there.
 
 ---
 

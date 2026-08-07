@@ -467,6 +467,13 @@ async def timeseries(camera: str, zone: str = None, since: int = None, until: in
     return stream.query_timeseries(camera, zone, since, until)
 
 
+@app.get("/api/cameras/{cam_id}/hourly")
+async def camera_hourly(cam_id: str, days: int = 7):
+    """Saat profili — gunun hangi saatinde yakalama/dikkat dusuyor."""
+    from server import stream
+    return stream.hourly_profile(cam_id, days=days)
+
+
 @app.get("/api/dataset/stats")
 async def dataset_stats():
     """Birikmiş dikkat-olay veri seti — retail benchmark + model tohumu göstergesi."""

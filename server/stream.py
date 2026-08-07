@@ -99,6 +99,53 @@ def query_timeseries(camera_id, zone_id=None, since=None, until=None):
              "reaches": r[7], "samples": r[8]} for r in rows]
 
 
+def hourly_profile(camera_id, days=7):
+    """SAAT PROFILI: gunun hangi saatinde yakalama/dikkat cokuyor?
+
+    Gunluk toplam "kac kisi gecti"yi soyler ama NEREDE kaybedildigini gizler.
+    Saatlik kirilim genelde personel ya da vitrin sorununu gosterir ve magazanin
+    hemen aksiyona cevirebilecegi tek zaman-bazli kesittir.
+
+    Az orneklem KONUSMAZ: bir saat diliminde 20'den az kisi gorulmusse o saat
+    icin oran uretilmez (yuzeysel bir "%0 yakalama" yanlis aksiyon dogurur).
+    """
+    con = _db()
+    since = int(time.time()) - days * 86400
+    rows = con.execute(
+        "SELECT hour_ts, zone_id, traffic, impressions, attentive_sec, enters "
+        "FROM agg_hourly WHERE camera_id=? AND hour_ts>=?", (camera_id, since)).fetchall()
+    con.close()
+    buckets = {}
+    for hour_ts, zone_id, traffic, imp, att, enters in rows:
+        h = time.localtime(hour_ts).tm_hour
+        b = buckets.setdefault(h, {"hour": h, "traffic": 0, "impressions": 0,
+                                   "attentive_sec": 0.0, "enters": 0, "hours": 0})
+        if zone_id == "_cam":
+            b["traffic"] += traffic
+            b["hours"] += 1
+        else:
+            b["impressions"] += imp
+            b["attentive_sec"] += att
+            b["enters"] += enters
+    out = []
+    for h in sorted(buckets):
+        b = buckets[h]
+        row = {"hour": h, "traffic": b["traffic"], "samples_hours": b["hours"],
+               "attentive_sec": round(b["attentive_sec"], 1)}
+        if b["traffic"] >= 20:          # durustluk esigi: az veriyle oran verme
+            row["capture_rate"] = round(b["enters"] / b["traffic"] * 100, 1)
+            row["attention_rate"] = round(b["impressions"] / b["traffic"] * 100, 1)
+        else:
+            row["note"] = "too few people this hour for a rate"
+        out.append(row)
+    # en zayif saat: yalnizca oran uretilebilen saatler arasinda
+    rated = [r for r in out if "capture_rate" in r]
+    weakest = min(rated, key=lambda r: r["capture_rate"]) if len(rated) >= 3 else None
+    return {"hours": out, "days": days,
+            "weakest_hour": weakest["hour"] if weakest else None,
+            "weakest_capture_rate": weakest["capture_rate"] if weakest else None}
+
+
 # ---------------- worker ----------------
 class StreamWorker(threading.Thread):
     FLUSH_SEC = 60          # agregat upsert aralığı
